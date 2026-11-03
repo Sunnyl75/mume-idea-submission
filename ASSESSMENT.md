@@ -6,39 +6,49 @@ the final scores.
 
 ## Review flow
 
-1. In the private submitted-ideas forum, click **Assess idea**. A Council-only
-   ephemeral panel opens inside Discord. Panels are personal snapshots of a shared
-   D1 draft; use **Refresh** to see others' changes.
-2. **Issues requiring action** is a multi-select dropdown. Pick one or more issues
-   and explain them in the modal. None selected means pass by default, with no second.
-   Another Council member clicks **Second** once to endorse the
-   entire selection and its explanation. A member cannot second their own selection.
-   The seconder can withdraw their second; changing the selection or explanation
-   clears the second and attributes the new selection to the editor.
-3. **Adjust scores / feedback** opens a five-field form: three scores (`4 | reason`,
-   for example), an internal note / response guidance, and the reason for the edit.
-   Scores remain fluid during discussion. Usefulness ×1, Feasibility ×2 (effort only),
-   Interest ×1 produces 4–20 and the existing recommendation bands.
-4. **Agree with final scores** is a separate step. Three distinct Council members
-   explicitly agree to the complete set of scores and their reasons. The editor
-   can be one of the three, but editing does not count as agreement. Members can
-   withdraw their own score agreement. No voting on incomplete scores.
-5. Approval scopes are independent. Score/reason changes reset only score agreements.
-   Check selection/explanation changes reset only the checks second. An internal-note
-   edit resets neither: that note is working material, not part of the score vote.
-   All changes are audited. Underlying idea changes invalidate both approval scopes;
-   revise against its new content before new approvals or internal recording.
-6. **Preview internal summary** shows what will be recorded. When no issues are
-   selected, **Close and record internally** requires all scores and three score
-   agreements. When issues are selected, the complete check selection needs one
-   second; that return/defer outcome overrides scores and can be recorded before
-   completing them. It does not label unfinished scores as agreed.
-7. Closing posts the assessment only to the private Council thread and freezes it.
-   A Council member uses it as the basis for a separately written response. Nothing
-   reaches the public board, author or reviewed exports through this feature.
-8. **Reopen assessment** explicitly restarts both approval scopes: checks need a
-   fresh second if selected, and scores need three fresh agreements. A Resolved
-   idea must first be reopened using the status dropdown.
+1. In the private Council review thread, click **Assess idea**, then **Start
+   assessment**. Any Council member can start. Their name is shown as the editor;
+   merely opening a panel does not claim the assessment. Existing drafts keep their
+   scores, checks and history and start with no assigned editor after migration 0006.
+2. Click **Usefulness**, **Feasibility ×2** or **Interest**. Each opens a form with
+   a **1–5 dropdown**, the rubric description beside each option, a separate score
+   explanation, and a reason for the edit. No `number | explanation` syntax is used.
+   Use **Internal note** for response guidance. The weighted total remains 4–20.
+3. The editor saves changes directly. Other members use those same controls to
+   **request a change**. A request records its proposer, timestamp, reason, exact
+   replacement draft and base revision without changing the current assessment.
+   The panel lists recent requests; **View change requests** displays each complete
+   proposal with previous/next navigation, including withdrawn and outdated requests.
+4. The editor can **Accept / back and apply** a request. Alternatively, **one other
+   Council member** can use the same button while the editor is absent. The proposer
+   cannot back their own request. Application transfers editing to the proposer,
+   records the accepting/backing member, and applies exactly that proposal. Any
+   intervening assessment edit or idea-content change makes it outdated; a new
+   request is needed. Proposers can withdraw their pending requests.
+5. **Issues requiring action** is a multi-select dropdown. Unselected issues pass
+   by default. The editor saves a selection directly; another member proposes it as
+   a change request. Once selected checks are applied to the assessment, a different
+   Council member clicks **Second** once for the entire set and its explanation.
+   Backing a change request is not that checks second.
+6. **Agree with final scores** is separate. Three distinct Council members must
+   explicitly agree to the complete scores and their explanations. Editing, starting
+   an assessment and backing a request never create score agreements.
+7. Score/explanation edits reset score agreements only. Check/explanation edits reset
+   the checks second only. Internal-note edits reset neither. Underlying idea changes
+   invalidate both. Requesting or withdrawing a change resets neither because the
+   assessment has not changed. Accepted requests follow the same scope rules as edits.
+8. **Preview internal summary** shows what will be recorded. **Close and record
+   internally** requires three score agreements when no issues are selected; selected
+   checks instead need one second for an internal return/defer record. Closing freezes
+   editing and request application. The existing Reviewed gate still requires three
+   agreements on the complete current scores, even for a return/defer assessment.
+9. **Reopen assessment** clears both approvals and the editor so any Council member
+   can start the next round. Scores and request/event history remain. A Resolved idea
+   must first be reopened using its status dropdown.
+
+Panels are personal snapshots of the shared assessment. **Refresh** reloads the
+current draft and requests. Requests and assessments are Council-only working
+material; a member writes the eventual player-facing response separately.
 
 The existing In Proposal / Final Draft / Submitted / Reviewed / Resolved status
 workflow stays separate. Closing an assessment does not change the idea status.
@@ -81,6 +91,20 @@ such failures. A maintainer can recover a persistently failed reserved publicati
 by fixing Discord permissions and retrying; do not reset it before checking for an
 already-delivered message. Mentions in assessment output are suppressed.
 
+Migration `0006_assessment_change_requests.sql` adds nullable editor fields and
+an append-only-in-content change-request table. Prior assessments, approvals,
+requests and audit records are not deleted. Request creation, withdrawal and
+application are audited transactionally. The editor check and request application
+are enforced in the database write, not just by showing/hiding controls. A stale
+request cannot overwrite a newer revision or changed idea. Requests can be applied
+only by a different Council member and only while the assessment is open.
+
+Each score modal uses Discord Label components containing a String Select and
+separate Text Inputs. Both Label and legacy Action Row submissions can be read;
+legacy combined-score modal saves must be refreshed instead of being silently
+interpreted as dropdown input. Test the updated modal on actual Discord clients
+before production deployment.
+
 Existing PR #1 tables/history are retained. On first native access, existing values
 are imported into an **unagreed draft**; old per-item seconds never count as the new
 three-person agreement. The previous web review page explains where reviewing moved,
@@ -102,7 +126,7 @@ npx wrangler deploy --dry-run
 ```
 
 After review, the maintainer verifies the correct Cloudflare account, applies
-migrations 0004 and 0005 and deploys to staging, then production. Existing configured roles
+migrations 0004, 0005 and 0006 and deploys to staging, then production. Existing configured roles
 and permissions should suffice; the bot needs Send Messages, Embed Links, Manage
 Threads and Read Message History in the relevant forums. No new Discord portal
 configuration or command registration is needed.

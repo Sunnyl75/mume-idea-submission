@@ -16,16 +16,28 @@ import type { ReviewDraft, Reviewer } from "../lib/sharedReview";
 import {
   getReview,
   agreements,
-  editReview,
   agreeReview,
   withdrawAgreement,
   reservePublish,
   finishPublish,
   secondChecks,
   withdrawChecksSecond,
+  startReview,
+  reviewChanges,
+  saveOrRequestChange,
+  applyReviewChange,
+  withdrawReviewChange,
 } from "../lib/sharedReviewDb";
 import type { SharedReview } from "../lib/sharedReviewDb";
 import { discordFetch, discordJson } from "./rest";
+interface ModalField {
+  type?: number;
+  custom_id?: string;
+  value?: string;
+  values?: string[];
+  component?: ModalField;
+  components?: ModalField[];
+}
 export interface ReviewInteraction {
   type: number;
   guild_id?: string;
@@ -39,9 +51,7 @@ export interface ReviewInteraction {
   data?: {
     custom_id?: string;
     values?: string[];
-    components?: Array<{
-      components?: Array<{ custom_id: string; value: string }>;
-    }>;
+    components?: ModalField[];
   };
 }
 const response = (body: unknown) =>
@@ -70,19 +80,26 @@ const textInput = (
   max: number,
   required = true,
 ) => ({
-  type: 1,
-  components: [
-    {
-      type: 4,
-      custom_id: id,
-      label,
-      style: 2,
-      value,
-      max_length: max,
-      required,
-    },
-  ],
+  type: 18,
+  label,
+  component: {
+    type: 4,
+    custom_id: id,
+    style: 2,
+    value,
+    max_length: max,
+    required,
+  },
 });
+const requestCurrent = (
+  q: import("../lib/sharedReviewDb").ReviewChange,
+  r: SharedReview,
+  idea: IdeaRow,
+) =>
+  q.status === "pending" &&
+  q.base_revision === r.revision &&
+  q.idea_content === contentOf(idea);
+
 export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
   const draft: ReviewDraft = JSON.parse(r.draft),
     result = draftResult(draft);
@@ -135,6 +152,27 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
       value: escape(draft.note).slice(0, 1000),
       inline: false,
     });
+  fields.push({
+    name: "Assessment editor",
+    value: r.author_id
+      ? `${escape(r.author_name || "Council")} · Others can request changes using the score, checks or note controls.`
+      : "Not started. Any Council member can start this assessment.",
+    inline: false,
+  });
+  const requests = await reviewChanges(env, idea.id);
+  if (requests.length)
+    fields.push({
+      name: "Change requests",
+      value: requests
+        .map(
+          (
+            q,
+          ) => `#${q.id} · ${escape(q.proposer_name)} · ${requestCurrent(q, r, idea) ? "Awaiting author acceptance or one other backer" : q.status === "pending" ? "Outdated" : q.status}
+${escape(q.reason).slice(0, 160)}`,
+        )
+        .join("\n\n"),
+      inline: false,
+    });
   const status = closed
     ? "Closed — recorded in the private Council thread"
     : busy
@@ -151,7 +189,7 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
     embeds: [
       {
         title: `Council assessment · Idea #${idea.id}`,
-        description: `**${escape(idea.title)}**\n${status}\nRevision ${r.revision} · ${closed ? "Final" : "Draft"}\nSelected checks need one second as a group. Final scores need three agreements. Refresh to see other reviewers’ changes.`,
+        description: `**${escape(idea.title)}**\n${status}\nRevision ${r.revision} · ${closed ? "Final" : "Draft"}\nSelected checks need one second as a group. Final scores need three agreements. Refresh to see other reviewers’ changes. Change requests never overwrite the draft until accepted or backed.`,
         color: result.flags.length ? 0xd39a31 : 0x5865f2,
         fields,
       },
@@ -166,7 +204,7 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
             placeholder: "Issues requiring action (none = pass)",
             min_values: 0,
             max_values: 6,
-            disabled: closed || busy,
+            disabled: closed || busy || !r.author_id,
             options: CHECKS.map((c) => ({
               label: c.name,
               value: c.id,
@@ -178,13 +216,33 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
       {
         type: 1,
         components: [
+          ...CRITERIA.map((c) =>
+            button(
+              c.name + (c.weight === 2 ? " ×2" : ""),
+              cid(`score-${c.id}`),
+              2,
+              closed || busy || !r.author_id,
+            ),
+          ),
           button(
-            closed ? "Reopen assessment" : "Adjust scores / feedback",
-            cid(closed ? "reopen" : "edit"),
+            "Internal note",
+            cid("note"),
             2,
-            busy,
+            closed || busy || !r.author_id,
           ),
           button("Refresh", cid("refresh")),
+        ],
+      },
+      {
+        type: 1,
+        components: [
+          button(
+            closed ? "Reopen assessment" : "Start assessment",
+            cid(closed ? "reopen" : "start"),
+            1,
+            busy || (!closed && !!r.author_id),
+          ),
+          button("View change requests", cid("changes")),
           button("Preview internal summary", cid("preview")),
         ],
       },
@@ -242,11 +300,114 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
 function modal(id: string, title: string, components: unknown[]) {
   return response({ type: 9, data: { custom_id: id, title, components } });
 }
+function fieldsOf(i: ReviewInteraction): ModalField[] {
+  const fields: ModalField[] = [];
+  const visit = (c: ModalField) => {
+    if (c.custom_id) fields.push(c);
+    if (c.component) visit(c.component);
+    for (const child of c.components ?? []) visit(child);
+  };
+  for (const c of i.data?.components ?? []) visit(c);
+  if (new Set(fields.map((c) => c.custom_id)).size !== fields.length)
+    throw Error("Duplicate form fields.");
+  return fields;
+}
 function inputs(i: ReviewInteraction) {
-  const out: Record<string, string> = {};
-  for (const row of i.data?.components ?? [])
-    for (const c of row.components ?? []) out[c.custom_id] = c.value;
-  return out;
+  return Object.fromEntries(
+    fieldsOf(i)
+      .filter((c) => typeof c.value === "string")
+      .map((c) => [c.custom_id!, c.value!]),
+  );
+}
+async function changePayload(
+  env: Env,
+  idea: IdeaRow,
+  r: SharedReview,
+  page = 0,
+) {
+  const [q] = await reviewChanges(env, idea.id, 1, page);
+  const cid = (op: string, value: number) =>
+    `review:${op}:${idea.id}:${r.revision}:${value}`;
+  const navigation = [
+    button(
+      "Previous request",
+      cid("changes", Math.max(0, page - 1)),
+      2,
+      page === 0,
+    ),
+    button(
+      "Next request",
+      cid("changes", page + 1),
+      2,
+      !(await reviewChanges(env, idea.id, 1, page + 1)).length,
+    ),
+    button("Back to assessment", `review:refresh:${idea.id}:0`),
+  ];
+  if (!q)
+    return {
+      content: "No change requests.",
+      embeds: [],
+      components: [{ type: 1, components: navigation }],
+      allowed_mentions: { parse: [] },
+    };
+  const d: ReviewDraft = JSON.parse(q.draft);
+  const current =
+    requestCurrent(q, r, idea) &&
+    r.status === "open" &&
+    idea.status !== "resolved";
+  const fields = CRITERIA.map((c) => ({
+    name: c.name + (c.weight === 2 ? " ×2" : ""),
+    value:
+      d.scores[c.id] === null
+        ? "Not assessed"
+        : `${d.scores[c.id]}/5 · ${c.levels[d.scores[c.id]! - 1]}\n${escape(d.reasons[c.id] || "").slice(0, 500)}`,
+  }));
+  fields.push({
+    name: "Selected checks",
+    value: d.issues.length
+      ? CHECKS.filter((c) => d.issues.includes(c.id))
+          .map((c) => c.name)
+          .join(", ") +
+        "\n" +
+        escape(d.issueReason).slice(0, 1000)
+      : "None — pass by default",
+  });
+  fields.push({
+    name: "Internal note",
+    value: escape(d.note).slice(0, 1000) || "None",
+  });
+  return {
+    content: "",
+    embeds: [
+      {
+        title: `Change request #${q.id} · Idea #${idea.id}`,
+        description: `By **${escape(q.proposer_name)}** against revision ${q.base_revision}. ${current ? "Pending" : q.status === "pending" ? "Outdated — submit a fresh request" : q.status}\n${escape(q.reason).slice(0, 1000)}\n\nThis is the exact proposed replacement. The editor can accept it, or one other Council member can back it. Applying transfers editing to the proposer; it does not second checks or agree to scores.`,
+        fields,
+        color: 0x5865f2,
+      },
+    ],
+    components: [
+      {
+        type: 1,
+        components: [
+          button(
+            "Accept / back and apply",
+            cid("backchange", q.id),
+            1,
+            !current,
+          ),
+          button(
+            "Withdraw my request",
+            cid("withdrawchange", q.id),
+            2,
+            q.status !== "pending" || r.status !== "open",
+          ),
+        ],
+      },
+      { type: 1, components: navigation },
+    ],
+    allowed_mentions: { parse: [] },
+  };
 }
 async function publish(
   env: Env,
@@ -354,7 +515,9 @@ export async function handleReviewInteraction(
   };
   // Modal openings need an immediate response. Other operations are deferred
   // before touching D1 or Discord so rate limits cannot exhaust Discord's ACK.
-  const openModal = i.type === 3 && (op === "edit" || op === "issues");
+  const criterion = CRITERIA.find((c) => op === `score-${c.id}`);
+  const openModal =
+    i.type === 3 && (!!criterion || op === "note" || op === "issues");
   if (openModal) {
     try {
       const idea = await getIdea(env, id);
@@ -366,28 +529,69 @@ export async function handleReviewInteraction(
       if (r.revision !== rev || r.status !== "open")
         return fail("This assessment changed or closed. Refresh it.");
       const d: ReviewDraft = JSON.parse(r.draft);
-      if (op === "edit")
-        return modal(`review:save:${id}:${rev}`, "Adjust Council assessment", [
-          ...CRITERIA.map((c) =>
+      if (!r.author_id) return fail("Click Start assessment first.");
+      const proposing = r.author_id !== actor.id;
+      if (criterion)
+        return modal(
+          `review:savescore:${id}:${rev}:${criterion.id}`,
+          `${proposing ? "Request" : "Edit"}: ${criterion.name}`,
+          [
+            {
+              type: 18,
+              label: `${criterion.name}${criterion.weight === 2 ? " (counts twice)" : ""}`,
+              component: {
+                type: 3,
+                custom_id: "score",
+                placeholder: "Choose a score from 1 to 5",
+                min_values: 1,
+                max_values: 1,
+                required: true,
+                options: criterion.levels.map((level, j) => ({
+                  label: String(j + 1),
+                  value: String(j + 1),
+                  description: level,
+                  default: d.scores[criterion.id] === j + 1,
+                })),
+              },
+            },
             textInput(
-              c.id,
-              `${c.name} (1–5): score | reason`,
-              d.scores[c.id] === null
-                ? ""
-                : `${d.scores[c.id]} | ${d.reasons[c.id]}`,
-              504,
+              "reason",
+              "Explanation for this score",
+              d.reasons[criterion.id] || "",
+              500,
+            ),
+            textInput(
+              "why",
+              proposing
+                ? "Why are you requesting this change?"
+                : "Why are you changing this score?",
+              "",
+              500,
+            ),
+          ],
+        );
+      if (op === "note")
+        return modal(
+          `review:savenote:${id}:${rev}`,
+          proposing ? "Request: internal note" : "Edit internal note",
+          [
+            textInput(
+              "note",
+              "Internal note / response guidance",
+              d.note,
+              1000,
               false,
             ),
-          ),
-          textInput(
-            "note",
-            "Internal note / response guidance",
-            d.note,
-            1000,
-            false,
-          ),
-          textInput("why", "Why are you changing this assessment?", "", 500),
-        ]);
+            textInput(
+              "why",
+              proposing
+                ? "Why are you requesting this change?"
+                : "Why are you changing this note?",
+              "",
+              500,
+            ),
+          ],
+        );
       const chosen = i.data?.values ?? [];
       if (
         chosen.some((x) => !CHECKS.some((c) => c.id === x)) ||
@@ -426,31 +630,33 @@ export async function handleReviewInteraction(
         if (!idea.review_thread_id || i.channel_id !== idea.review_thread_id)
           throw Error("Use the private Council review thread.");
         let r = await getReview(env, idea);
-        const readOnly = ["open", "refresh", "preview"].includes(op);
+        const readOnly = ["open", "refresh", "preview", "changes"].includes(op);
         if (!readOnly && (r.revision !== rev || idea.status === "resolved"))
           throw Error(
             "Assessment changed or idea resolved. Refresh or reopen the idea.",
           );
-        if (op === "save" && i.type === 5) {
+        if (op === "savescore" && i.type === 5) {
+          const c = CRITERIA.find((c) => c.id === parts[4]);
+          if (!c) throw Error("Unknown scoring criterion.");
+          const selection = fieldsOf(i).find(
+            (c) => c.custom_id === "score",
+          )?.values;
+          if (
+            !Array.isArray(selection) ||
+            selection.length !== 1 ||
+            !/^[1-5]$/.test(selection[0])
+          )
+            throw Error("Choose one score from 1 to 5.");
           const values = inputs(i),
             d: ReviewDraft = JSON.parse(r.draft);
-          for (const c of CRITERIA) {
-            const input = (values[c.id] ?? "").trim();
-            if (!input) {
-              d.scores[c.id] = null;
-              delete d.reasons[c.id];
-              continue;
-            }
-            const m = input.match(/^([1-5])\s*\|\s*(.+)$/s);
-            if (!m)
-              throw Error(
-                `${c.name}: enter a score and reason, e.g. 4 | Useful improvement.`,
-              );
-            d.scores[c.id] = Number(m[1]);
-            d.reasons[c.id] = m[2].trim();
-          }
+          d.scores[c.id] = Number(selection[0]);
+          d.reasons[c.id] = values.reason ?? "";
+          await saveOrRequestChange(env, r, idea, d, actor, values.why ?? "");
+        } else if (op === "savenote" && i.type === 5) {
+          const values = inputs(i),
+            d: ReviewDraft = JSON.parse(r.draft);
           d.note = values.note ?? "";
-          await editReview(env, r, idea, d, actor, values.why ?? "");
+          await saveOrRequestChange(env, r, idea, d, actor, values.why ?? "");
         } else if (op === "setissues" && i.type === 5) {
           const mask = Number(parts[4]);
           if (!Number.isInteger(mask) || mask < 0 || mask > 63)
@@ -459,7 +665,26 @@ export async function handleReviewInteraction(
             d: ReviewDraft = JSON.parse(r.draft);
           d.issues = CHECKS.filter((_, j) => mask & (2 ** j)).map((c) => c.id);
           d.issueReason = d.issues.length ? (values.reason ?? "") : "";
-          await editReview(env, r, idea, d, actor, values.reason ?? "");
+          await saveOrRequestChange(
+            env,
+            r,
+            idea,
+            d,
+            actor,
+            values.reason ?? "",
+          );
+        } else if (op === "start" && i.type === 3)
+          await startReview(env, r, actor);
+        else if (
+          (op === "backchange" || op === "withdrawchange") &&
+          i.type === 3
+        ) {
+          const requestId = Number(parts[4]);
+          if (!Number.isSafeInteger(requestId) || requestId <= 0)
+            throw Error("Invalid change request.");
+          if (op === "backchange")
+            await applyReviewChange(env, r, idea, requestId, actor);
+          else await withdrawReviewChange(env, r, requestId, actor);
         } else if (op === "agree" && i.type === 3)
           await agreeReview(env, r, actor);
         else if (op === "secondchecks" && i.type === 3)
@@ -476,6 +701,17 @@ export async function handleReviewInteraction(
           await reopen(env, r, idea, actor);
         } else if (!readOnly) throw Error("Unknown assessment action.");
         r = await getReview(env, idea);
+        if (op === "changes") {
+          const page = Number(parts[4] ?? 0);
+          if (!Number.isSafeInteger(page) || page < 0)
+            throw Error("Invalid request page.");
+          await discordFetch(env, webhook, {
+            method: "PATCH",
+            unauthenticated: true,
+            body: await changePayload(env, idea, r, page),
+          });
+          return;
+        }
         const payload = await reviewPayload(env, idea, r);
         if (op === "preview") {
           const text = feedbackFor(idea, JSON.parse(r.draft));
@@ -531,7 +767,7 @@ async function reopen(
   // Reopening is an explicit change, not an accidental edit of a final result.
   const result = await env.DB.batch([
     env.DB.prepare(
-      `UPDATE council_reviews SET status='open',revision=revision+1,score_revision=score_revision+1,checks_revision=checks_revision+1,checks_seconder_id=NULL,checks_seconder_name=NULL,checks_proposer_id=?,checks_proposer_name=?,idea_content=?,record_message_id=NULL WHERE idea_id=? AND revision=? AND status='published'`,
+      `UPDATE council_reviews SET status='open',author_id=NULL,author_name=NULL,revision=revision+1,score_revision=score_revision+1,checks_revision=checks_revision+1,checks_seconder_id=NULL,checks_seconder_name=NULL,checks_proposer_id=?,checks_proposer_name=?,idea_content=?,record_message_id=NULL WHERE idea_id=? AND revision=? AND status='published'`,
     ).bind(
       JSON.parse(r.draft).issues.length ? actor.id : null,
       JSON.parse(r.draft).issues.length ? actor.name : null,

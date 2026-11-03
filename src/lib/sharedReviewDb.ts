@@ -23,6 +23,8 @@ export interface SharedReview {
   checks_proposer_name: string | null;
   checks_seconder_id: string | null;
   checks_seconder_name: string | null;
+  author_id: string | null;
+  author_name: string | null;
 }
 const now = () => Math.floor(Date.now() / 1000);
 export async function getReview(
@@ -101,6 +103,17 @@ export async function editReview(
   actor: Reviewer,
   reason: string,
 ): Promise<void> {
+  return commitRevision(env, r, idea, draft, actor, reason);
+}
+async function commitRevision(
+  env: Env,
+  r: SharedReview,
+  idea: IdeaRow,
+  draft: ReviewDraft,
+  actor: Reviewer,
+  reason: string,
+  request?: ReviewChange,
+): Promise<void> {
   validateDraft(draft);
   if (!reason.trim() || reason.length > 1000)
     throw Error("Explain the revision (up to 1000 characters).");
@@ -115,6 +128,13 @@ export async function editReview(
   if (r.draft === JSON.stringify(draft) && !contentChanged && !checksChanged)
     throw Error("No assessment changes to save.");
   const next = { ...r, revision: r.revision + 1 };
+  const editor = request
+    ? { id: request.proposer_id, name: request.proposer_name }
+    : actor;
+  const permission = request
+    ? `EXISTS(SELECT 1 FROM council_review_changes q WHERE q.id=? AND q.idea_id=council_reviews.idea_id AND q.base_revision=council_reviews.revision AND q.idea_content=council_reviews.idea_content AND q.status='pending' AND q.proposer_id!=?)`
+    : `(author_id IS NULL OR author_id=?)`;
+  const permissionArgs = request ? [request.id, actor.id] : [actor.id];
   const res = await env.DB.batch([
     env.DB.prepare(
       `UPDATE council_reviews SET draft=?,idea_content=?,revision=revision+1,
@@ -123,27 +143,53 @@ export async function editReview(
        checks_proposer_name=CASE WHEN ? THEN ? ELSE checks_proposer_name END,
        checks_seconder_id=CASE WHEN ? THEN NULL ELSE checks_seconder_id END,
        checks_seconder_name=CASE WHEN ? THEN NULL ELSE checks_seconder_name END,
-       status='open',record_message_id=NULL,updated_at=? WHERE idea_id=? AND revision=? AND status='open' AND (SELECT status FROM ideas WHERE id=?)!='resolved'`,
+       status='open',record_message_id=NULL,updated_at=?,author_id=?,author_name=?
+       WHERE idea_id=? AND revision=? AND status='open'
+       AND (SELECT status FROM ideas WHERE id=?)!='resolved'
+       AND (SELECT json_array(title,answers,schema_version) FROM ideas WHERE id=?)=?
+       AND ${permission}`,
     ).bind(
       JSON.stringify(draft),
       contentOf(idea),
       Number(scoresChanged),
       Number(checksChanged),
       Number(checksChanged),
-      draft.issues.length ? actor.id : null,
+      draft.issues.length ? editor.id : null,
       Number(checksChanged),
-      draft.issues.length ? actor.name : null,
+      draft.issues.length ? editor.name : null,
       Number(checksChanged),
       Number(checksChanged),
       now(),
+      editor.id,
+      editor.name,
       r.idea_id,
       r.revision,
       r.idea_id,
+      r.idea_id,
+      contentOf(idea),
+      ...permissionArgs,
     ),
-    event(env, next, "revise", actor, reason),
+    event(
+      env,
+      next,
+      request ? "apply_change" : "revise",
+      actor,
+      request
+        ? `Request #${request.id} by ${request.proposer_name}: ${reason}`
+        : reason,
+    ),
+    ...(request
+      ? [
+          env.DB.prepare(
+            `UPDATE council_review_changes SET status='applied',applied_by_id=?,applied_by_name=? WHERE id=? AND changes()=1`,
+          ).bind(actor.id, actor.name, request.id),
+        ]
+      : []),
   ]);
   if (!res[0].meta.changes)
-    throw Error("Assessment changed or is closed. Refresh before editing.");
+    throw Error(
+      "Assessment changed, is closed, or has another editor. Refresh and request a change.",
+    );
 }
 export async function agreeReview(
   env: Env,
@@ -291,4 +337,142 @@ export async function canMarkReviewed(
     draftResult(draft).total !== null &&
     (await agreements(env, r)).length >= AGREEMENTS_REQUIRED
   );
+}
+
+export interface ReviewChange {
+  id: number;
+  idea_id: number;
+  base_revision: number;
+  idea_content: string;
+  proposer_id: string;
+  proposer_name: string;
+  draft: string;
+  reason: string;
+  status: string;
+  applied_by_id: string | null;
+  applied_by_name: string | null;
+}
+export async function startReview(env: Env, r: SharedReview, actor: Reviewer) {
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE council_reviews SET author_id=?,author_name=?,revision=revision+1,updated_at=?
+      WHERE idea_id=? AND revision=? AND author_id IS NULL AND status='open'
+      AND (SELECT status FROM ideas WHERE id=?)!='resolved'`,
+    ).bind(actor.id, actor.name, now(), r.idea_id, r.revision, r.idea_id),
+    event(
+      env,
+      { ...r, revision: r.revision + 1 },
+      "start",
+      actor,
+      "Started assessment",
+    ),
+  ]);
+  if (!result[0].meta.changes)
+    throw Error("Assessment already started or changed. Refresh it.");
+}
+export async function reviewChanges(
+  env: Env,
+  ideaId: number,
+  limit = 3,
+  offset = 0,
+) {
+  const rows = await env.DB.prepare(
+    "SELECT * FROM council_review_changes WHERE idea_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
+  )
+    .bind(ideaId, limit, offset)
+    .all<ReviewChange>();
+  return rows.results ?? [];
+}
+export async function saveOrRequestChange(
+  env: Env,
+  r: SharedReview,
+  idea: IdeaRow,
+  draft: ReviewDraft,
+  actor: Reviewer,
+  reason: string,
+) {
+  if (!r.author_id) throw Error("Click Start assessment first.");
+  if (r.author_id === actor.id)
+    return editReview(env, r, idea, draft, actor, reason);
+  validateDraft(draft);
+  if (!reason.trim() || reason.length > 1000)
+    throw Error("Explain the requested change.");
+  if (r.idea_content !== contentOf(idea))
+    throw Error("The idea changed; the editor must reassess it first.");
+  if (r.draft === JSON.stringify(draft)) throw Error("No changes to request.");
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO council_review_changes(idea_id,base_revision,idea_content,proposer_id,proposer_name,draft,reason,created_at)
+      SELECT idea_id,revision,idea_content,?,?,?,?,? FROM council_reviews
+      WHERE idea_id=? AND revision=? AND status='open' AND author_id IS NOT NULL AND author_id!=?
+      AND ${liveContentSql()} AND (SELECT status FROM ideas WHERE id=?)!='resolved'`,
+    ).bind(
+      actor.id,
+      actor.name,
+      JSON.stringify(draft),
+      reason.trim(),
+      now(),
+      r.idea_id,
+      r.revision,
+      actor.id,
+      r.idea_id,
+    ),
+    env.DB
+      .prepare(`INSERT INTO council_review_events(idea_id,revision,action,actor_id,actor_name,snapshot,reason,at)
+      SELECT idea_id,base_revision,'request_change',proposer_id,proposer_name,draft,reason,created_at
+      FROM council_review_changes WHERE id=last_insert_rowid() AND changes()=1`),
+  ]);
+  if (!result[0].meta.changes)
+    throw Error(
+      "Assessment changed or closed. Refresh before requesting a change.",
+    );
+}
+export async function applyReviewChange(
+  env: Env,
+  r: SharedReview,
+  idea: IdeaRow,
+  requestId: number,
+  actor: Reviewer,
+) {
+  const q = await env.DB.prepare(
+    "SELECT * FROM council_review_changes WHERE id=? AND idea_id=?",
+  )
+    .bind(requestId, r.idea_id)
+    .first<ReviewChange>();
+  if (
+    !q ||
+    q.status !== "pending" ||
+    q.base_revision !== r.revision ||
+    q.idea_content !== contentOf(idea)
+  )
+    throw Error(
+      "This change request is outdated or no longer pending. Refresh it.",
+    );
+  if (q.proposer_id === actor.id)
+    throw Error("A different Council member must back your request.");
+  // Author acceptance and one other backer have the same effect. Applying never
+  // creates a checks second or final-score vote. The proposer becomes the editor.
+  await commitRevision(env, r, idea, JSON.parse(q.draft), actor, q.reason, q);
+}
+export async function withdrawReviewChange(
+  env: Env,
+  r: SharedReview,
+  requestId: number,
+  actor: Reviewer,
+) {
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE council_review_changes SET status='withdrawn'
+      WHERE id=? AND idea_id=? AND proposer_id=? AND status='pending'
+      AND EXISTS(SELECT 1 FROM council_reviews WHERE idea_id=? AND status='open')`,
+    ).bind(requestId, r.idea_id, actor.id, r.idea_id),
+    env.DB.prepare(
+      `INSERT INTO council_review_events(idea_id,revision,action,actor_id,actor_name,snapshot,reason,at)
+      SELECT idea_id,base_revision,'withdraw_change',?,?,draft,reason,? FROM council_review_changes WHERE id=? AND changes()=1`,
+    ).bind(actor.id, actor.name, now(), requestId),
+  ]);
+  if (!result[0].meta.changes)
+    throw Error(
+      "Only the proposer can withdraw a pending request while the assessment is open.",
+    );
 }

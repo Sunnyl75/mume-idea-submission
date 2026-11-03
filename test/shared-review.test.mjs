@@ -11,7 +11,12 @@ import {
 } from "../src/lib/sharedReview.ts";
 import {
   getReview,
-  editReview,
+  editReview as directEditReview,
+  startReview,
+  saveOrRequestChange,
+  reviewChanges,
+  applyReviewChange,
+  withdrawReviewChange,
   agreeReview,
   agreements,
   withdrawAgreement,
@@ -30,6 +35,18 @@ import {
 const A = { id: "A", name: "Alice" },
   B = { id: "B", name: "Bob" },
   C = { id: "C", name: "Carol" };
+// Multi-actor regression scenarios now go through a change request and editor
+// acceptance. Separate governance tests below exercise the direct-write guard.
+async function editReview(env, r, idea, draft, actor, reason) {
+  if (!r.author_id || r.author_id === actor.id)
+    return directEditReview(env, r, idea, draft, actor, reason);
+  await saveOrRequestChange(env, r, idea, draft, actor, reason);
+  const [request] = await reviewChanges(env, idea.id);
+  await applyReviewChange(env, r, idea, request.id, {
+    id: r.author_id,
+    name: r.author_name,
+  });
+}
 const complete = () => ({
   ...emptyDraft(),
   scores: { usefulness: 4, feasibility: 3, interest: 4 },
@@ -82,6 +99,7 @@ async function fixture() {
     "0003_assessments.sql",
     "0004_shared_council_review.sql",
     "0005_separate_checks_and_scores.sql",
+    "0006_assessment_change_requests.sql",
   ]) {
     // Execute schema statements separately; SQL comments can include semicolons.
     const sql = readFileSync("migrations/" + name, "utf8").replace(
@@ -183,7 +201,7 @@ test("D1: three distinct final-score agreements, revisions, audit, stale ideas, 
     assert.match(
       (
         await env.DB.prepare(
-          "SELECT snapshot FROM council_review_events WHERE action='revise' ORDER BY id DESC LIMIT 1",
+          "SELECT snapshot FROM council_review_events WHERE action IN ('revise','apply_change') ORDER BY id DESC LIMIT 1",
         ).first()
       ).snapshot,
       /Final feedback changed/,
@@ -206,7 +224,7 @@ test("D1: three distinct final-score agreements, revisions, audit, stale ideas, 
       title: "Changed idea",
       answers: JSON.stringify({ proposal: "different" }),
     };
-    await editReview(env, r, changed, revised, A, "Reassessed changed idea");
+    await editReview(env, r, changed, revised, B, "Reassessed changed idea");
     r = await getReview(env, changed);
     await agreeReview(env, r, A);
     await agreeReview(env, r, B);
@@ -627,6 +645,316 @@ test("Reviewed status is blocked until three members agree to the current final 
       "approved",
     );
   } finally {
+    await mf.dispose();
+  }
+});
+
+test("editor lock: requests preserve the draft; author acceptance applies the exact snapshot and transfers editing", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    const unclaimed = r;
+    await startReview(env, r, A);
+    await assert.rejects(startReview(env, unclaimed, B));
+    r = await getReview(env, idea);
+    assert.equal(r.author_id, A.id);
+    await directEditReview(env, r, idea, complete(), A, "Initial scores");
+    r = await getReview(env, idea);
+    const d = JSON.parse(r.draft);
+    d.issues = ["clarity"];
+    d.issueReason = "Clarify the problem";
+    await directEditReview(env, r, idea, d, A, "Triage");
+    r = await getReview(env, idea);
+    await secondChecks(env, r, C);
+    await agreeReview(env, r, A);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
+    const candidate = JSON.parse(r.draft);
+    candidate.scores.feasibility = 5;
+    candidate.reasons.feasibility = "Existing command already supports this";
+    await assert.rejects(
+      directEditReview(env, r, idea, candidate, B, "Overwrite"),
+    );
+    // Even a caller lying about the editor cannot defeat the SQL guard.
+    await assert.rejects(
+      directEditReview(
+        env,
+        { ...r, author_id: B.id },
+        idea,
+        candidate,
+        B,
+        "Forged overwrite",
+      ),
+    );
+    await saveOrRequestChange(
+      env,
+      r,
+      idea,
+      candidate,
+      B,
+      "A smaller adjustment is sufficient",
+    );
+    const [request] = await reviewChanges(env, idea.id);
+    assert.equal(request.proposer_id, B.id);
+    assert.equal((await getReview(env, idea)).draft, r.draft);
+    assert.equal((await agreements(env, r)).length, 3);
+    await assert.rejects(
+      applyReviewChange(env, r, idea, request.id, B),
+      /different/,
+    );
+    await applyReviewChange(env, r, idea, request.id, A);
+    r = await getReview(env, idea);
+    assert.deepEqual(JSON.parse(r.draft), candidate);
+    assert.equal(r.author_id, B.id);
+    assert.equal(r.checks_seconder_id, C.id);
+    assert.equal((await agreements(env, r)).length, 0);
+    assert.equal((await reviewChanges(env, idea.id))[0].applied_by_id, A.id);
+    await assert.rejects(applyReviewChange(env, r, idea, request.id, C));
+    const event = await env.DB.prepare(
+      "SELECT * FROM council_review_events WHERE action='request_change'",
+    ).first();
+    assert.equal(event.actor_id, B.id);
+    assert.deepEqual(JSON.parse(event.snapshot), candidate);
+    assert.equal(event.reason, request.reason);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("one backer applies while the editor is absent; competing requests become stale; requests remain auditable", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
+    r = await getReview(env, idea);
+    const candidate = JSON.parse(r.draft);
+    candidate.note = "Suggested response";
+    await agreeReview(env, r, A);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
+    await saveOrRequestChange(env, r, idea, candidate, B, "Proposed wording");
+    const [first] = await reviewChanges(env, idea.id);
+    const alternative = { ...candidate, note: "Alternative wording" };
+    await saveOrRequestChange(
+      env,
+      r,
+      idea,
+      alternative,
+      C,
+      "Alternative request",
+    );
+    const [other] = await reviewChanges(env, idea.id);
+    await applyReviewChange(env, r, idea, first.id, C);
+    r = await getReview(env, idea);
+    assert.equal(r.author_id, B.id);
+    assert.equal(JSON.parse(r.draft).note, candidate.note);
+    assert.equal(
+      (await agreements(env, r)).length,
+      3,
+      "Note-only application preserves score agreements",
+    );
+    await assert.rejects(
+      applyReviewChange(env, r, idea, other.id, A),
+      /outdated/,
+    );
+    assert.equal((await reviewChanges(env, idea.id)).length, 2);
+    assert.equal(
+      (await reviewChanges(env, idea.id))[0].draft,
+      JSON.stringify(alternative),
+    );
+    await assert.rejects(withdrawReviewChange(env, r, other.id, A));
+    await withdrawReviewChange(env, r, other.id, C);
+    assert.equal((await reviewChanges(env, idea.id))[0].status, "withdrawn");
+    const third = JSON.parse(r.draft);
+    third.issues = ["evidence"];
+    third.issueReason = "Need test examples";
+    await saveOrRequestChange(env, r, idea, third, A, "Evidence needed");
+    const [checks] = await reviewChanges(env, idea.id);
+    await applyReviewChange(env, r, idea, checks.id, C);
+    r = await getReview(env, idea);
+    assert.equal(r.checks_proposer_id, A.id);
+    assert.equal(r.checks_seconder_id, null, "Backing is not a checks second");
+    assert.equal(
+      (await agreements(env, r)).length,
+      3,
+      "Check changes preserve score agreements",
+    );
+    await assert.rejects(reservePublish(env, r), /second/);
+    await secondChecks(env, r, C);
+    r = await getReview(env, idea);
+    await reservePublish(env, r);
+    await assert.rejects(
+      saveOrRequestChange(env, r, idea, candidate, B, "While frozen"),
+    );
+    await assert.rejects(applyReviewChange(env, r, idea, checks.id, B));
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("idea changes and concurrent author edits prevent applying outdated proposals", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
+    r = await getReview(env, idea);
+    const candidate = { ...JSON.parse(r.draft), note: "Suggestion" };
+    await saveOrRequestChange(env, r, idea, candidate, B, "Request");
+    const [request] = await reviewChanges(env, idea.id);
+    const edited = { ...JSON.parse(r.draft), note: "Author revision" };
+    await directEditReview(env, r, idea, edited, A, "Revise");
+    await assert.rejects(applyReviewChange(env, r, idea, request.id, C));
+    r = await getReview(env, idea);
+    await saveOrRequestChange(env, r, idea, candidate, B, "New request");
+    const [fresh] = await reviewChanges(env, idea.id);
+    await updateIdeaAnswers(
+      env,
+      1,
+      "Changed",
+      { proposal: "New content" },
+      1,
+      1,
+    );
+    await assert.rejects(
+      applyReviewChange(env, r, idea, fresh.id, C),
+      /another editor|changed/,
+    );
+    const changed = {
+      ...idea,
+      title: "Changed",
+      answers: JSON.stringify({ proposal: "New content" }),
+    };
+    await assert.rejects(
+      applyReviewChange(env, r, changed, fresh.id, C),
+      /outdated/,
+    );
+    assert.equal((await getReview(env, changed)).draft, r.draft);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("native score modals use a 1–5 select with separate explanations; non-editors create visible requests", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  let delivered;
+  globalThis.fetch = async (_url, options) => {
+    delivered = JSON.parse(options.body);
+    return new Response("{}");
+  };
+  const interaction = (op, rev, actor = A, fields = [], type = 3) => ({
+    type,
+    guild_id: "guild",
+    channel_id: "private",
+    application_id: "app",
+    token: "token",
+    member: {
+      roles: ["council"],
+      user: { id: actor.id, username: actor.name },
+    },
+    data: { custom_id: `review:${op}:1:${rev}`, components: fields },
+  });
+  const submit = async (i) => {
+    let pending;
+    const ack = await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      i,
+    );
+    assert.equal((await ack.json()).type, 5);
+    await pending;
+    return delivered;
+  };
+  const fields = (score, reason = "Benefit", why = "Discussed") => [
+    { type: 18, component: { type: 3, custom_id: "score", values: score } },
+    { type: 18, component: { type: 4, custom_id: "reason", value: reason } },
+    { type: 18, component: { type: 4, custom_id: "why", value: why } },
+  ];
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    const modal = await handleReviewInteraction(
+      env,
+      {
+        waitUntil() {
+          throw Error("Modal needs immediate ACK");
+        },
+      },
+      interaction("score-usefulness", r.revision),
+    );
+    const body = await modal.json();
+    assert.equal(body.type, 9);
+    assert.equal(body.data.components.length, 3);
+    const select = body.data.components[0].component;
+    assert.equal(select.type, 3);
+    assert.deepEqual(
+      select.options.map((o) => o.value),
+      ["1", "2", "3", "4", "5"],
+    );
+    assert.ok(select.options.every((o) => o.description.length <= 100));
+    assert.equal(body.data.components[1].component.custom_id, "reason");
+    for (const invalid of [[], ["6"], ["1", "2"], ["3 | reason"], ["03"]]) {
+      // Explicitly construct the criterion suffix after the revision.
+      const i = interaction("savescore", r.revision, A, fields(invalid), 5);
+      i.data.custom_id += ":usefulness";
+      assert.match((await submit(i)).content, /Choose one score/);
+      assert.equal((await getReview(env, idea)).revision, r.revision);
+    }
+    for (const score of ["1", "2", "3", "4", "5"]) {
+      const i = interaction("savescore", r.revision, A, fields([score]), 5);
+      i.data.custom_id += ":usefulness";
+      await submit(i);
+      r = await getReview(env, idea);
+      assert.equal(JSON.parse(r.draft).scores.usefulness, Number(score));
+    }
+    const missingReason = interaction(
+      "savescore",
+      r.revision,
+      A,
+      fields(["4"], ""),
+      5,
+    );
+    missingReason.data.custom_id += ":usefulness";
+    assert.match((await submit(missingReason)).content, /Explain each score/);
+    const proposal = interaction(
+      "savescore",
+      r.revision,
+      B,
+      fields(["2"], "Less useful", "Narrow case"),
+      5,
+    );
+    proposal.data.custom_id += ":usefulness";
+    const panel = await submit(proposal);
+    assert.equal((await getReview(env, idea)).revision, r.revision);
+    assert.equal((await reviewChanges(env, idea.id))[0].proposer_id, B.id);
+    assert.ok(
+      panel.embeds[0].fields.some(
+        (f) => f.name === "Change requests" && f.value.includes("Bob"),
+      ),
+    );
+    assert.ok(panel.components.length <= 5);
+    for (const row of panel.components) assert.ok(row.components.length <= 5);
+    const card = await submit(interaction("changes", r.revision));
+    assert.match(card.embeds[0].description, /Bob/);
+    assert.equal(card.embeds[0].fields[0].value.startsWith("2/5"), true);
+    const request = (await reviewChanges(env, idea.id))[0];
+    const backing = interaction("backchange", r.revision, C);
+    backing.data.custom_id += `:${request.id}`;
+    await submit(backing);
+    r = await getReview(env, idea);
+    assert.equal(r.author_id, B.id);
+    assert.equal(JSON.parse(r.draft).scores.usefulness, 2);
+    assert.equal((await agreements(env, r)).length, 0);
+    const stale = interaction("savescore", r.revision - 1, A, fields(["5"]), 5);
+    stale.data.custom_id += ":usefulness";
+    assert.match((await submit(stale)).content, /changed/);
+  } finally {
+    globalThis.fetch = originalFetch;
     await mf.dispose();
   }
 });
