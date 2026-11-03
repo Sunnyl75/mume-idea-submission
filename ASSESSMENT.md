@@ -10,14 +10,17 @@ the final scores.
    assessment**. Any Council member can start. Their name is shown as the editor;
    merely opening a panel does not claim the assessment. Existing drafts keep their
    scores, checks and history and start with no assigned editor after migration 0006.
-2. Click **Usefulness**, **Feasibility ×2** or **Interest**. Each opens a form with
-   a **1–5 dropdown**, the rubric description beside each option, a separate score
-   explanation, and a reason for the edit. No `number | explanation` syntax is used.
-   Use **Internal note** for response guidance. The weighted total remains 4–20.
+2. Click **Score**. One popup contains all three **1–5 dropdowns**, with rubric
+   descriptions on the options and current scores preselected. A single optional
+   **Reason for changed scores** box covers the scores being changed. It can be left
+   blank if no score changes. On a change, a reason is required on submission and
+   becomes the explanation for each changed score. Unchanged scores keep their
+   existing explanations. Submitting unchanged scores writes nothing, creates no
+   change request and preserves all approvals. Scores may be left unassessed.
 3. The editor saves changes directly. Other members use those same controls to
    **request a change**. A request records its proposer, timestamp, reason, exact
    replacement draft and base revision without changing the current assessment.
-   The panel lists recent requests; **View change requests** displays each complete
+   The panel lists recent requests; **More options → Change requests** displays each complete
    proposal with previous/next navigation, including withdrawn and outdated requests.
 4. The editor can **Accept / back and apply** a request. Alternatively, **one other
    Council member** can use the same button while the editor is absent. The proposer
@@ -34,11 +37,11 @@ the final scores.
    explicitly agree to the complete scores and their explanations. Editing, starting
    an assessment and backing a request never create score agreements.
 7. Score/explanation edits reset score agreements only. Check/explanation edits reset
-   the checks second only. Internal-note edits reset neither. Underlying idea changes
+   the checks second only. Underlying idea changes
    invalidate both. Requesting or withdrawing a change resets neither because the
    assessment has not changed. Accepted requests follow the same scope rules as edits.
-8. **Preview internal summary** shows what will be recorded. **Close and record
-   internally** requires three score agreements when no issues are selected; selected
+8. **More options → Review summary** shows what will be recorded. **Close
+   assessment** requires three score agreements when no issues are selected; selected
    checks instead need one second for an internal return/defer record. Closing freezes
    editing and request application. The existing Reviewed gate still requires three
    agreements on the complete current scores, even for a return/defer assessment.
@@ -46,9 +49,17 @@ the final scores.
    can start the next round. Scores and request/event history remain. A Resolved idea
    must first be reopened using its status dropdown.
 
-Panels are personal snapshots of the shared assessment. **Refresh** reloads the
-current draft and requests. Requests and assessments are Council-only working
-material; a member writes the eventual player-facing response separately.
+Checks, Scores and assessment actions are separate bordered sections. **Second**
+and **Withdraw my Second** are adjacent, as are the two score-agreement buttons.
+After starting, the disabled start button reads **Assessment in Progress**.
+There is no Internal note control; existing stored notes/history remain intact.
+
+Actions and component-modal submissions update the same private panel rather than
+adding a response for every change. **More options → Reload latest assessment**
+loads changes made by other Council members after the panel was opened. Summary
+and request-detail views replace this panel and have a Back button. Merely opening
+Assess idea again creates another personal panel. Assessments stay Council-only;
+a member writes the eventual player-facing response separately.
 
 The existing In Proposal / Final Draft / Submitted / Reviewed / Resolved status
 workflow stays separate. Closing an assessment does not change the idea status.
@@ -99,11 +110,14 @@ are enforced in the database write, not just by showing/hiding controls. A stale
 request cannot overwrite a newer revision or changed idea. Requests can be applied
 only by a different Council member and only while the assessment is open.
 
-Each score modal uses Discord Label components containing a String Select and
-separate Text Inputs. Both Label and legacy Action Row submissions can be read;
+The score modal uses three Discord Label components containing String Selects and
+one optional reason Text Input. Discord modals have no disabled fields or live
+on-change callbacks, so the reason cannot dynamically gray out or become required
+while the popup is open. Conditional validation happens on submission. Both Label and legacy Action Row submissions can be read;
 legacy combined-score modal saves must be refreshed instead of being silently
 interpreted as dropdown input. Test the updated modal on actual Discord clients
-before production deployment.
+before production deployment. The compact panel uses Components V2 containers;
+public idea posts and the recorded Council summary keep their existing format.
 
 Existing PR #1 tables/history are retained. On first native access, existing values
 are imported into an **unagreed draft**; old per-item seconds never count as the new

@@ -44,6 +44,7 @@ export interface ReviewInteraction {
   channel_id?: string;
   token: string;
   application_id: string;
+  message?: { id?: string; flags?: number };
   member?: {
     roles: string[];
     user: { id: string; username: string; global_name?: string | null };
@@ -100,7 +101,32 @@ const requestCurrent = (
   q.base_revision === r.revision &&
   q.idea_content === contentOf(idea);
 
-export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
+const COMPONENTS_V2 = 1 << 15;
+const text = (content: string) => ({ type: 10, content });
+const row = (...components: unknown[]) => ({ type: 1, components });
+const box = (...components: unknown[]) => ({ type: 17, components });
+function panel(components: unknown[]) {
+  // Explicitly clear legacy content/embeds when upgrading an existing panel.
+  return {
+    flags: COMPONENTS_V2,
+    content: null,
+    embeds: [],
+    components,
+    allowed_mentions: { parse: [] },
+  };
+}
+function summaryPanel(title: string, body: string, controls: unknown[]) {
+  const blocks = [text(`### ${title}`)];
+  for (let n = 0; n < body.length; n += 3500)
+    blocks.push(text(body.slice(n, n + 3500)));
+  return panel([box(...blocks), ...controls]);
+}
+export async function reviewPayload(
+  env: Env,
+  idea: IdeaRow,
+  r: SharedReview,
+  viewerId?: string,
+) {
   const draft: ReviewDraft = JSON.parse(r.draft),
     result = draftResult(draft);
   const stale = r.idea_content !== contentOf(idea),
@@ -108,194 +134,176 @@ export async function reviewPayload(env: Env, idea: IdeaRow, r: SharedReview) {
   const closed = r.status === "published",
     busy = r.status === "publishing";
   const cid = (op: string) => `review:${op}:${idea.id}:${r.revision}`;
-  const fields = CRITERIA.map((c) => ({
-    name: `${c.name}${c.weight === 2 ? " ×2" : ""}`,
-    value:
-      draft.scores[c.id] === null
-        ? "Not assessed"
-        : `**${draft.scores[c.id]}/5** · ${c.levels[draft.scores[c.id]! - 1]}\n${escape(draft.reasons[c.id] || "").slice(0, 650)}`,
-    inline: false,
-  }));
-  fields.push({
-    name: "Issues requiring action",
-    value: result.flags.length
-      ? result.flags.map((c) => `• ${c.name}`).join("\n") +
-        "\n" +
-        escape(draft.issueReason).slice(0, 1000)
-      : "None selected — checks pass by default.",
-    inline: false,
-  });
-  fields.push({
-    name: "Selected checks — one second",
-    value: !draft.issues.length
-      ? "Pass by default; no second needed."
-      : stale
-        ? "Idea changed — re-assess the checks."
-        : r.checks_proposer_id
-          ? `Selected by ${escape(r.checks_proposer_name || "Council")}` +
-            (checksAgreed(draft, r.checks_proposer_id, r.checks_seconder_id)
-              ? ` · Seconded by ${escape(r.checks_seconder_name || "Council")}`
-              : " · Awaiting a second")
-          : "Imported draft — propose the complete selection before another member seconds it.",
-    inline: false,
-  });
-  fields.push({
-    name: "Final-score agreement",
-    value: stale
-      ? "The idea changed. Revise this draft to assess the updated idea; old agreements no longer count."
-      : `${votes.length}/${AGREEMENTS_REQUIRED} Council members${votes.length ? "\n" + votes.map((a) => escape(a.name)).join(", ") : ""}`,
-    inline: false,
-  });
-  if (draft.note)
-    fields.push({
-      name: "Internal Council note",
-      value: escape(draft.note).slice(0, 1000),
-      inline: false,
-    });
-  fields.push({
-    name: "Assessment editor",
-    value: r.author_id
-      ? `${escape(r.author_name || "Council")} · Others can request changes using the score, checks or note controls.`
-      : "Not started. Any Council member can start this assessment.",
-    inline: false,
-  });
+  const locked = closed || busy || !r.author_id;
+  const mine = votes.some((v) => v.id === viewerId);
+  const checksStatus = !draft.issues.length
+    ? "No issues selected — checks pass."
+    : stale
+      ? "Idea changed — reassess the checks."
+      : checksAgreed(draft, r.checks_proposer_id, r.checks_seconder_id)
+        ? `Seconded by ${escape(r.checks_seconder_name || "Council")}.`
+        : "Selected checks need one other member to second them.";
+  const scores = CRITERIA.map(
+    (c) =>
+      `${c.name}${c.weight === 2 ? " ×2" : ""}: **${draft.scores[c.id] === null ? "—" : draft.scores[c.id] + "/5"}**`,
+  ).join(" · ");
+  const resultLine = stale
+    ? "Idea changed — score agreements no longer count."
+    : result.total === null
+      ? "Choose scores to calculate the recommendation."
+      : result.flags.length
+        ? `**${result.total}/20** · Selected checks take priority.`
+        : `**${result.total}/20 · ${result.band!.name}**`;
   const requests = await reviewChanges(env, idea.id);
-  if (requests.length)
-    fields.push({
-      name: "Change requests",
-      value: requests
-        .map(
-          (
-            q,
-          ) => `#${q.id} · ${escape(q.proposer_name)} · ${requestCurrent(q, r, idea) ? "Awaiting author acceptance or one other backer" : q.status === "pending" ? "Outdated" : q.status}
-${escape(q.reason).slice(0, 160)}`,
-        )
-        .join("\n\n"),
-      inline: false,
-    });
-  const status = closed
-    ? "Closed — recorded in the private Council thread"
+  const pending = requests.filter((q) => requestCurrent(q, r, idea));
+  const state = closed
+    ? "Closed — recorded privately"
     : busy
-      ? "Publication in progress — retry if the previous attempt failed"
-      : stale
-        ? "Idea changed — reassessment required"
-        : result.flags.length
-          ? "Further action required"
-          : result.band
-            ? `${result.band.name} · ${result.total}/20`
-            : "Scores incomplete";
-  return {
-    content: "",
-    embeds: [
-      {
-        title: `Council assessment · Idea #${idea.id}`,
-        description: `**${escape(idea.title)}**\n${status}\nRevision ${r.revision} · ${closed ? "Final" : "Draft"}\nSelected checks need one second as a group. Final scores need three agreements. Refresh to see other reviewers’ changes. Change requests never overwrite the draft until accepted or backed.`,
-        color: result.flags.length ? 0xd39a31 : 0x5865f2,
-        fields,
-      },
-    ],
-    components: [
-      {
-        type: 1,
-        components: [
+      ? "Recording assessment…"
+      : r.author_id
+        ? "Assessment in Progress"
+        : "Assessment not started";
+  const extraOptions = [
+    {
+      label: "Review summary",
+      value: "preview",
+      description: "Read the scores, explanations and proposed feedback",
+    },
+    ...(requests.length
+      ? [
           {
-            type: 3,
-            custom_id: cid("issues"),
-            placeholder: "Issues requiring action (none = pass)",
-            min_values: 0,
-            max_values: 6,
-            disabled: closed || busy || !r.author_id,
-            options: CHECKS.map((c) => ({
-              label: c.name,
-              value: c.id,
-              default: draft.issues.includes(c.id),
-            })),
+            label: "Change requests",
+            value: "changes",
+            description: "Read, accept or back proposed changes",
           },
-        ],
-      },
-      {
-        type: 1,
-        components: [
-          ...CRITERIA.map((c) =>
-            button(
-              c.name + (c.weight === 2 ? " ×2" : ""),
-              cid(`score-${c.id}`),
-              2,
-              closed || busy || !r.author_id,
+        ]
+      : []),
+    {
+      label: "Reload latest assessment",
+      value: "refresh",
+      description: "Show any changes made by other Council members",
+    },
+  ];
+  return panel([
+    text(`## Assessment · Idea #${idea.id}\n**${escape(idea.title)}**`),
+    box(
+      text(
+        `### Checks\n${checksStatus}${
+          draft.issues.length
+            ? "\n" +
+              CHECKS.filter((c) => draft.issues.includes(c.id))
+                .map((c) => c.name)
+                .join(" · ") +
+              "\n" +
+              escape(draft.issueReason).slice(0, 1000)
+            : ""
+        }`,
+      ),
+      row({
+        type: 3,
+        custom_id: cid("issues"),
+        placeholder: "Select issues, or leave empty to pass",
+        min_values: 0,
+        max_values: 6,
+        disabled: locked,
+        options: CHECKS.map((c) => ({
+          label: c.name,
+          value: c.id,
+          default: draft.issues.includes(c.id),
+        })),
+      }),
+      row(
+        button(
+          "Second",
+          cid("secondchecks"),
+          2,
+          closed ||
+            busy ||
+            stale ||
+            !draft.issues.length ||
+            !r.checks_proposer_id ||
+            !!r.checks_seconder_id ||
+            r.checks_proposer_id === viewerId,
+        ),
+        button(
+          "Withdraw my Second",
+          cid("withdrawchecks"),
+          2,
+          closed ||
+            busy ||
+            stale ||
+            !r.checks_seconder_id ||
+            (!!viewerId && r.checks_seconder_id !== viewerId),
+        ),
+      ),
+    ),
+    box(
+      text(
+        `### Scores\n${scores}\n${resultLine}\n**${votes.length}/${AGREEMENTS_REQUIRED} agreements**${
+          votes.length
+            ? " · " +
+              votes
+                .map((v) => escape(v.name))
+                .join(", ")
+                .slice(0, 700)
+            : ""
+        }`,
+      ),
+      row(button("Score", cid("scores"), 1, locked)),
+      row(
+        button(
+          "Agree with final scores",
+          cid("agree"),
+          2,
+          closed || busy || stale || result.total === null || mine,
+        ),
+        button(
+          "Withdraw score agreement",
+          cid("withdraw"),
+          2,
+          closed || busy || stale || (!!viewerId && !mine),
+        ),
+      ),
+    ),
+    box(
+      text(
+        `**${state}**${r.author_id ? " · Editor: " + escape(r.author_name || "Council") : ""}${pending.length ? "\nChange requests: " + pending.map((q) => `#${q.id} by ${escape(q.proposer_name)}`).join(", ") : ""}`,
+      ),
+      row(
+        button(
+          closed
+            ? "Reopen assessment"
+            : r.author_id
+              ? "Assessment in Progress"
+              : "Start assessment",
+          cid(closed ? "reopen" : "start"),
+          2,
+          busy || (!closed && !!r.author_id),
+        ),
+        button(
+          busy ? "Retry recording" : "Close assessment",
+          cid("publish"),
+          2,
+          closed ||
+            stale ||
+            !readyToClose(
+              draft,
+              votes.length,
+              r.checks_proposer_id,
+              r.checks_seconder_id,
             ),
-          ),
-          button(
-            "Internal note",
-            cid("note"),
-            2,
-            closed || busy || !r.author_id,
-          ),
-          button("Refresh", cid("refresh")),
-        ],
-      },
-      {
-        type: 1,
-        components: [
-          button(
-            closed ? "Reopen assessment" : "Start assessment",
-            cid(closed ? "reopen" : "start"),
-            1,
-            busy || (!closed && !!r.author_id),
-          ),
-          button("View change requests", cid("changes")),
-          button("Preview internal summary", cid("preview")),
-        ],
-      },
-      {
-        type: 1,
-        components: [
-          button(
-            "Second",
-            cid("secondchecks"),
-            1,
-            closed ||
-              busy ||
-              stale ||
-              !draft.issues.length ||
-              !r.checks_proposer_id ||
-              !!r.checks_seconder_id,
-          ),
-          button(
-            "Agree with final scores",
-            cid("agree"),
-            1,
-            closed || busy || stale || result.total === null,
-          ),
-          button(
-            "Withdraw score agreement",
-            cid("withdraw"),
-            2,
-            closed || busy || stale,
-          ),
-          button(
-            "Withdraw my second",
-            cid("withdrawchecks"),
-            2,
-            closed || busy || stale || !r.checks_seconder_id,
-          ),
-          button(
-            busy ? "Retry internal recording" : "Close and record internally",
-            cid("publish"),
-            1,
-            closed ||
-              stale ||
-              !readyToClose(
-                draft,
-                votes.length,
-                r.checks_proposer_id,
-                r.checks_seconder_id,
-              ),
-          ),
-        ],
-      },
-    ],
-    allowed_mentions: { parse: [] },
-  };
+        ),
+      ),
+      row({
+        type: 3,
+        custom_id: cid("menu"),
+        placeholder: "More options",
+        min_values: 1,
+        max_values: 1,
+        options: extraOptions,
+      }),
+    ),
+  ]);
 }
 function modal(id: string, title: string, components: unknown[]) {
   return response({ type: 9, data: { custom_id: id, title, components } });
@@ -344,12 +352,10 @@ async function changePayload(
     button("Back to assessment", `review:refresh:${idea.id}:0`),
   ];
   if (!q)
-    return {
-      content: "No change requests.",
-      embeds: [],
-      components: [{ type: 1, components: navigation }],
-      allowed_mentions: { parse: [] },
-    };
+    return panel([
+      text("No change requests."),
+      { type: 1, components: navigation },
+    ]);
   const d: ReviewDraft = JSON.parse(q.draft);
   const current =
     requestCurrent(q, r, idea) &&
@@ -372,12 +378,7 @@ async function changePayload(
         escape(d.issueReason).slice(0, 1000)
       : "None — pass by default",
   });
-  fields.push({
-    name: "Internal note",
-    value: escape(d.note).slice(0, 1000) || "None",
-  });
-  return {
-    content: "",
+  const detail = {
     embeds: [
       {
         title: `Change request #${q.id} · Idea #${idea.id}`,
@@ -408,6 +409,14 @@ async function changePayload(
     ],
     allowed_mentions: { parse: [] },
   };
+  const e = detail.embeds[0];
+  return summaryPanel(
+    e.title,
+    e.description +
+      "\n\n" +
+      e.fields.map((f) => `**${f.name}**\n${f.value}`).join("\n\n"),
+    detail.components,
+  );
 }
 async function publish(
   env: Env,
@@ -499,9 +508,19 @@ export async function handleReviewInteraction(
   )
     return fail("Only White Council members can assess ideas.");
   const parts = (i.data?.custom_id ?? "").split(":"),
-    op = parts[1],
     id = Number(parts[2]),
     rev = Number(parts[3]);
+  let op = parts[1];
+  if (op === "menu") {
+    const chosen = i.data?.values;
+    if (
+      i.type !== 3 ||
+      chosen?.length !== 1 ||
+      !["preview", "changes", "refresh"].includes(chosen[0])
+    )
+      return fail("Unknown assessment option.");
+    op = chosen[0];
+  }
   if (
     !Number.isSafeInteger(id) ||
     id <= 0 ||
@@ -515,9 +534,7 @@ export async function handleReviewInteraction(
   };
   // Modal openings need an immediate response. Other operations are deferred
   // before touching D1 or Discord so rate limits cannot exhaust Discord's ACK.
-  const criterion = CRITERIA.find((c) => op === `score-${c.id}`);
-  const openModal =
-    i.type === 3 && (!!criterion || op === "note" || op === "issues");
+  const openModal = i.type === 3 && (op === "scores" || op === "issues");
   if (openModal) {
     try {
       const idea = await getIdea(env, id);
@@ -531,65 +548,40 @@ export async function handleReviewInteraction(
       const d: ReviewDraft = JSON.parse(r.draft);
       if (!r.author_id) return fail("Click Start assessment first.");
       const proposing = r.author_id !== actor.id;
-      if (criterion)
+      if (op === "scores")
         return modal(
-          `review:savescore:${id}:${rev}:${criterion.id}`,
-          `${proposing ? "Request" : "Edit"}: ${criterion.name}`,
+          `review:savescores:${id}:${rev}`,
+          proposing ? "Request score changes" : "Score assessment",
           [
-            {
+            ...CRITERIA.map((c) => ({
               type: 18,
-              label: `${criterion.name}${criterion.weight === 2 ? " (counts twice)" : ""}`,
+              label: c.name + (c.weight === 2 ? " (counts twice)" : ""),
               component: {
                 type: 3,
-                custom_id: "score",
-                placeholder: "Choose a score from 1 to 5",
-                min_values: 1,
+                custom_id: c.id,
+                placeholder: "Choose 1–5 (blank = not assessed)",
+                min_values: 0,
                 max_values: 1,
-                required: true,
-                options: criterion.levels.map((level, j) => ({
+                required: false,
+                options: c.levels.map((level, j) => ({
                   label: String(j + 1),
                   value: String(j + 1),
                   description: level,
-                  default: d.scores[criterion.id] === j + 1,
+                  default: d.scores[c.id] === j + 1,
                 })),
               },
+            })),
+            {
+              ...textInput(
+                "reason",
+                "Reason for changed scores",
+                "",
+                500,
+                false,
+              ),
+              description:
+                "Leave blank if scores are unchanged. One explanation covers the scores you change.",
             },
-            textInput(
-              "reason",
-              "Explanation for this score",
-              d.reasons[criterion.id] || "",
-              500,
-            ),
-            textInput(
-              "why",
-              proposing
-                ? "Why are you requesting this change?"
-                : "Why are you changing this score?",
-              "",
-              500,
-            ),
-          ],
-        );
-      if (op === "note")
-        return modal(
-          `review:savenote:${id}:${rev}`,
-          proposing ? "Request: internal note" : "Edit internal note",
-          [
-            textInput(
-              "note",
-              "Internal note / response guidance",
-              d.note,
-              1000,
-              false,
-            ),
-            textInput(
-              "why",
-              proposing
-                ? "Why are you requesting this change?"
-                : "Why are you changing this note?",
-              "",
-              500,
-            ),
           ],
         );
       const chosen = i.data?.values ?? [];
@@ -635,28 +627,41 @@ export async function handleReviewInteraction(
           throw Error(
             "Assessment changed or idea resolved. Refresh or reopen the idea.",
           );
-        if (op === "savescore" && i.type === 5) {
-          const c = CRITERIA.find((c) => c.id === parts[4]);
-          if (!c) throw Error("Unknown scoring criterion.");
-          const selection = fieldsOf(i).find(
-            (c) => c.custom_id === "score",
-          )?.values;
-          if (
-            !Array.isArray(selection) ||
-            selection.length !== 1 ||
-            !/^[1-5]$/.test(selection[0])
-          )
-            throw Error("Choose one score from 1 to 5.");
-          const values = inputs(i),
+        if (op === "savescores" && i.type === 5) {
+          const submitted = fieldsOf(i),
+            values = inputs(i),
             d: ReviewDraft = JSON.parse(r.draft);
-          d.scores[c.id] = Number(selection[0]);
-          d.reasons[c.id] = values.reason ?? "";
-          await saveOrRequestChange(env, r, idea, d, actor, values.why ?? "");
-        } else if (op === "savenote" && i.type === 5) {
-          const values = inputs(i),
-            d: ReviewDraft = JSON.parse(r.draft);
-          d.note = values.note ?? "";
-          await saveOrRequestChange(env, r, idea, d, actor, values.why ?? "");
+          const changed: string[] = [];
+          for (const c of CRITERIA) {
+            const selection = submitted.find(
+              (f) => f.custom_id === c.id,
+            )?.values;
+            if (
+              !Array.isArray(selection) ||
+              selection.length > 1 ||
+              (selection.length === 1 && !/^[1-5]$/.test(selection[0]))
+            )
+              throw Error(
+                `${c.name}: choose one score from 1 to 5, or leave it blank.`,
+              );
+            const score = selection.length ? Number(selection[0]) : null;
+            if (score !== d.scores[c.id]) {
+              d.scores[c.id] = score;
+              changed.push(c.id);
+            }
+          }
+          if (changed.length) {
+            const reason = (values.reason ?? "").trim();
+            if (!reason)
+              throw Error(
+                "A score changed. Please give a reason for the changed scores.",
+              );
+            for (const id of changed) {
+              if (d.scores[id] === null) delete d.reasons[id];
+              else d.reasons[id] = reason;
+            }
+            await saveOrRequestChange(env, r, idea, d, actor, reason);
+          }
         } else if (op === "setissues" && i.type === 5) {
           const mask = Number(parts[4]);
           if (!Number.isInteger(mask) || mask < 0 || mask > 63)
@@ -712,21 +717,14 @@ export async function handleReviewInteraction(
           });
           return;
         }
-        const payload = await reviewPayload(env, idea, r);
-        if (op === "preview") {
-          const text = feedbackFor(idea, JSON.parse(r.draft));
-          payload.embeds = [];
-          for (let n = 0; n < text.length; n += 3500)
-            payload.embeds.push({
-              title:
-                n === 0
-                  ? "Internal summary preview — not recorded"
-                  : "Continued",
-              description: text.slice(n, n + 3500),
-              color: 0x5865f2,
-              fields: [],
-            });
-        }
+        const payload =
+          op === "preview"
+            ? summaryPanel(
+                "Assessment summary — not recorded",
+                feedbackFor(idea, JSON.parse(r.draft)),
+                [row(button("Back to assessment", `review:refresh:${id}:0`))],
+              )
+            : await reviewPayload(env, idea, r, actor.id);
         await discordFetch(env, webhook, {
           method: "PATCH",
           unauthenticated: true,
@@ -737,26 +735,20 @@ export async function handleReviewInteraction(
         await discordFetch(env, webhook, {
           method: "PATCH",
           unauthenticated: true,
-          body: {
-            content:
-              (e as Error).message ||
-              "Assessment failed. Refresh and try again.",
-            embeds: [],
-            components: [
-              {
-                type: 1,
-                components: [
-                  button("Refresh assessment", `review:refresh:${id}:0`),
-                ],
-              },
-            ],
-            allowed_mentions: { parse: [] },
-          },
+          body: summaryPanel(
+            "Assessment",
+            (e as Error).message || "Assessment failed. Try again.",
+            [row(button("Back to assessment", `review:refresh:${id}:0`))],
+          ),
         }).catch(() => {});
       }
     })(),
   );
-  return response({ type: 5, data: { flags: EPHEMERAL } });
+  // Update the private panel that supplied this button/modal. Only opening from
+  // the thread's public Assess button creates a new private response.
+  return i.message && (i.message.flags ?? 0) & EPHEMERAL
+    ? response({ type: 6 })
+    : response({ type: 5, data: { flags: EPHEMERAL } });
 }
 async function reopen(
   env: Env,

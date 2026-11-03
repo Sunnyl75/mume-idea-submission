@@ -32,6 +32,21 @@ import {
   reviewPayload,
   reviewButton,
 } from "../src/discord/review.ts";
+function nodes(payload) {
+  const out = [];
+  function visit(c) {
+    out.push(c);
+    for (const child of c.components ?? []) visit(child);
+    if (c.component) visit(c.component);
+  }
+  for (const c of payload.components ?? []) visit(c);
+  return out;
+}
+const panelText = (p) =>
+  nodes(p)
+    .filter((c) => c.type === 10)
+    .map((c) => c.content)
+    .join("\n");
 const A = { id: "A", name: "Alice" },
   B = { id: "B", name: "Bob" },
   C = { id: "C", name: "Carol" };
@@ -304,8 +319,14 @@ test("native controls: role/guild guard, early deferred ACK, component limits, u
     r = await getReview(dbEnv, idea);
     const p = await reviewPayload(dbEnv, idea, r);
     assert.ok(p.components.length <= 5);
-    assert.equal(p.components[0].components[0].min_values, 0);
-    assert.equal(p.components[0].components[0].max_values, 6);
+    assert.equal(
+      nodes(p).find((c) => c.custom_id?.includes(":issues:")).min_values,
+      0,
+    );
+    assert.equal(
+      nodes(p).find((c) => c.custom_id?.includes(":issues:")).max_values,
+      6,
+    );
     assert.equal(reviewButton(1).components[0].custom_id, "review:open:1:0");
     let pending;
     const ack = await handleReviewInteraction(
@@ -391,10 +412,7 @@ test("native recording: private Council summary, frozen result, retry without du
     assert.ok(posted.nonce.length <= 25);
     r = await getReview(env, idea);
     assert.equal(r.status, "published");
-    assert.match(
-      shown.embeds[0].description,
-      /Closed — recorded in the private Council thread/,
-    );
+    assert.match(panelText(shown), /Closed — recorded privately/);
     // Retrying an already completed operation must not emit a second internal message.
     await handleReviewInteraction(
       env,
@@ -569,7 +587,7 @@ test("selected checks can be recorded with one second, without voting on unfinis
     r = await getReview(env, idea);
     assert.equal((await agreements(env, r)).length, 0);
     const payload = await reviewPayload(env, idea, r);
-    const buttons = payload.components.flatMap((row) => row.components);
+    const buttons = nodes(payload).filter((c) => c.type === 2);
     assert.equal(
       buttons.find((b) => b.custom_id?.includes(":agree:")).disabled,
       true,
@@ -579,7 +597,11 @@ test("selected checks can be recorded with one second, without voting on unfinis
       false,
     );
     assert.ok(payload.components.length <= 5);
-    assert.ok(payload.components.every((row) => row.components.length <= 5));
+    assert.ok(
+      nodes(payload)
+        .filter((c) => c.type === 1)
+        .every((row) => row.components.length <= 5),
+    );
     await reservePublish(env, r);
     await finishPublish(env, r, "internal-record", B);
     r = await getReview(env, idea);
@@ -834,7 +856,7 @@ test("idea changes and concurrent author edits prevent applying outdated proposa
   }
 });
 
-test("native score modals use a 1–5 select with separate explanations; non-editors create visible requests", async () => {
+test("one Score modal edits all criteria; unchanged scores require no reason and preserve agreements", async () => {
   const { mf, env, idea } = await fixture();
   const originalFetch = globalThis.fetch;
   let delivered;
@@ -848,6 +870,7 @@ test("native score modals use a 1–5 select with separate explanations; non-edi
     channel_id: "private",
     application_id: "app",
     token: "token",
+    message: { id: "personal-panel", flags: 64 | 32768 },
     member: {
       roles: ["council"],
       user: { id: actor.id, username: actor.name },
@@ -865,19 +888,32 @@ test("native score modals use a 1–5 select with separate explanations; non-edi
       },
       i,
     );
-    assert.equal((await ack.json()).type, 5);
+    assert.equal(
+      (await ack.json()).type,
+      6,
+      "Update the existing private panel",
+    );
     await pending;
     return delivered;
   };
-  const fields = (score, reason = "Benefit", why = "Discussed") => [
-    { type: 18, component: { type: 3, custom_id: "score", values: score } },
+  const fields = (u, f = ["3"], interest = ["4"], reason = "Benefit") => [
+    ...[
+      ["usefulness", u],
+      ["feasibility", f],
+      ["interest", interest],
+    ].map(([id, values]) => ({
+      type: 18,
+      component: { type: 3, custom_id: id, values },
+    })),
     { type: 18, component: { type: 4, custom_id: "reason", value: reason } },
-    { type: 18, component: { type: 4, custom_id: "why", value: why } },
   ];
   try {
     let r = await getReview(env, idea);
-    await startReview(env, r, A);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
     r = await getReview(env, idea);
+    await agreeReview(env, r, A);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
     const modal = await handleReviewInteraction(
       env,
       {
@@ -885,74 +921,246 @@ test("native score modals use a 1–5 select with separate explanations; non-edi
           throw Error("Modal needs immediate ACK");
         },
       },
-      interaction("score-usefulness", r.revision),
+      interaction("scores", r.revision),
     );
     const body = await modal.json();
     assert.equal(body.type, 9);
-    assert.equal(body.data.components.length, 3);
-    const select = body.data.components[0].component;
-    assert.equal(select.type, 3);
-    assert.deepEqual(
-      select.options.map((o) => o.value),
-      ["1", "2", "3", "4", "5"],
-    );
-    assert.ok(select.options.every((o) => o.description.length <= 100));
-    assert.equal(body.data.components[1].component.custom_id, "reason");
-    for (const invalid of [[], ["6"], ["1", "2"], ["3 | reason"], ["03"]]) {
-      // Explicitly construct the criterion suffix after the revision.
-      const i = interaction("savescore", r.revision, A, fields(invalid), 5);
-      i.data.custom_id += ":usefulness";
-      assert.match((await submit(i)).content, /Choose one score/);
-      assert.equal((await getReview(env, idea)).revision, r.revision);
+    assert.equal(body.data.components.length, 4);
+    for (const label of body.data.components.slice(0, 3)) {
+      const select = label.component;
+      assert.equal(select.type, 3);
+      assert.deepEqual(
+        select.options.map((o) => o.value),
+        ["1", "2", "3", "4", "5"],
+      );
+      assert.ok(select.options.every((o) => o.description.length <= 100));
+      assert.equal(select.options.filter((o) => o.default).length, 1);
     }
-    for (const score of ["1", "2", "3", "4", "5"]) {
-      const i = interaction("savescore", r.revision, A, fields([score]), 5);
-      i.data.custom_id += ":usefulness";
-      await submit(i);
-      r = await getReview(env, idea);
-      assert.equal(JSON.parse(r.draft).scores.usefulness, Number(score));
-    }
-    const missingReason = interaction(
-      "savescore",
-      r.revision,
-      A,
-      fields(["4"], ""),
-      5,
-    );
-    missingReason.data.custom_id += ":usefulness";
-    assert.match((await submit(missingReason)).content, /Explain each score/);
-    const proposal = interaction(
-      "savescore",
-      r.revision,
-      B,
-      fields(["2"], "Less useful", "Narrow case"),
-      5,
-    );
-    proposal.data.custom_id += ":usefulness";
-    const panel = await submit(proposal);
-    assert.equal((await getReview(env, idea)).revision, r.revision);
-    assert.equal((await reviewChanges(env, idea.id))[0].proposer_id, B.id);
-    assert.ok(
-      panel.embeds[0].fields.some(
-        (f) => f.name === "Change requests" && f.value.includes("Bob"),
+    assert.equal(body.data.components[3].component.required, false);
+    await submit(
+      interaction(
+        "savescores",
+        r.revision,
+        A,
+        fields(["4"], ["3"], ["4"], ""),
+        5,
       ),
     );
-    assert.ok(panel.components.length <= 5);
-    for (const row of panel.components) assert.ok(row.components.length <= 5);
-    const card = await submit(interaction("changes", r.revision));
-    assert.match(card.embeds[0].description, /Bob/);
-    assert.equal(card.embeds[0].fields[0].value.startsWith("2/5"), true);
+    assert.equal((await getReview(env, idea)).revision, r.revision);
+    assert.equal((await agreements(env, r)).length, 3);
+    for (const invalid of [["6"], ["1", "2"], ["3 | reason"], ["03"]]) {
+      assert.match(
+        panelText(
+          await submit(
+            interaction("savescores", r.revision, A, fields(invalid), 5),
+          ),
+        ),
+        /choose one score/,
+      );
+      assert.equal((await getReview(env, idea)).revision, r.revision);
+    }
+    assert.match(
+      panelText(
+        await submit(
+          interaction(
+            "savescores",
+            r.revision,
+            A,
+            fields(["2"], ["3"], ["4"], ""),
+            5,
+          ),
+        ),
+      ),
+      /score changed/,
+    );
+    assert.equal((await agreements(env, r)).length, 3);
+    for (const score of ["1", "2", "3", "4", "5"]) {
+      await submit(
+        interaction("savescores", r.revision, A, fields([score]), 5),
+      );
+      r = await getReview(env, idea);
+      assert.equal(JSON.parse(r.draft).scores.usefulness, Number(score));
+      assert.equal(
+        JSON.parse(r.draft).reasons.feasibility,
+        "Moderate work",
+        "Unchanged explanations are preserved",
+      );
+    }
+    await submit(
+      interaction(
+        "savescores",
+        r.revision,
+        A,
+        fields([], ["3"], ["4"], "Not enough evidence to rate"),
+        5,
+      ),
+    );
+    r = await getReview(env, idea);
+    assert.equal(JSON.parse(r.draft).scores.usefulness, null);
+    const proposal = await submit(
+      interaction(
+        "savescores",
+        r.revision,
+        B,
+        fields(["2"], ["5"], ["4"], "Less work and a narrower benefit"),
+        5,
+      ),
+    );
+    assert.equal((await getReview(env, idea)).revision, r.revision);
+    assert.match(panelText(proposal), /Change requests:.*Bob/);
     const request = (await reviewChanges(env, idea.id))[0];
+    assert.equal(JSON.parse(request.draft).scores.feasibility, 5);
+    const card = await submit(interaction("changes", r.revision));
+    assert.match(panelText(card), /Bob/);
+    assert.match(panelText(card), /2\/5/);
     const backing = interaction("backchange", r.revision, C);
     backing.data.custom_id += `:${request.id}`;
     await submit(backing);
     r = await getReview(env, idea);
     assert.equal(r.author_id, B.id);
-    assert.equal(JSON.parse(r.draft).scores.usefulness, 2);
     assert.equal((await agreements(env, r)).length, 0);
-    const stale = interaction("savescore", r.revision - 1, A, fields(["5"]), 5);
-    stale.data.custom_id += ":usefulness";
-    assert.match((await submit(stale)).content, /changed/);
+    assert.match(
+      panelText(
+        await submit(
+          interaction("savescores", r.revision - 1, A, fields(["5"]), 5),
+        ),
+      ),
+      /changed/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("compact panel uses bordered sections, adjacent approval pairs and no Internal note or standalone Refresh", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    let p = await reviewPayload(env, idea, r, A.id);
+    assert.equal(p.flags, 32768);
+    assert.deepEqual(p.embeds, []);
+    assert.equal(p.components.filter((c) => c.type === 17).length, 3);
+    assert.ok(nodes(p).length <= 40);
+    assert.equal(
+      nodes(p).filter((c) => c.type === 2 && c.label === "Score").length,
+      1,
+    );
+    assert.ok(
+      nodes(p).some((c) => c.label === "Start assessment" && !c.disabled),
+    );
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    p = await reviewPayload(env, idea, r, A.id);
+    assert.ok(
+      nodes(p).some((c) => c.label === "Assessment in Progress" && c.disabled),
+    );
+    assert.ok(
+      !nodes(p).some((c) =>
+        [
+          "Start assessment",
+          "Internal note",
+          "Refresh",
+          "Usefulness",
+          "Interest",
+        ].includes(c.label),
+      ),
+    );
+    const rows = nodes(p).filter((c) => c.type === 1);
+    assert.ok(
+      rows.some(
+        (row) =>
+          row.components.map((c) => c.label).join("|") ===
+          "Second|Withdraw my Second",
+      ),
+    );
+    assert.ok(
+      rows.some(
+        (row) =>
+          row.components.map((c) => c.label).join("|") ===
+          "Agree with final scores|Withdraw score agreement",
+      ),
+    );
+    assert.ok(
+      nodes(p).some((c) =>
+        c.options?.some(
+          (o) =>
+            o.label === "Reload latest assessment" &&
+            o.description.includes("other Council"),
+        ),
+      ),
+    );
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("opening from the thread creates one private response; private controls and component modals update that response", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url, body: JSON.parse(init.body) });
+    return new Response("{}");
+  };
+  const base = {
+    type: 3,
+    guild_id: "guild",
+    channel_id: "private",
+    application_id: "app",
+    token: "token",
+    member: { roles: ["council"], user: { id: A.id, username: A.name } },
+    data: { custom_id: "review:open:1:0" },
+  };
+  async function run(i, expected) {
+    let pending;
+    const ack = await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      i,
+    );
+    assert.equal((await ack.json()).type, expected);
+    await pending;
+  }
+  try {
+    await run(base, 5);
+    const privateMessage = { id: "personal-panel", flags: 64 | 32768 };
+    await run(
+      {
+        ...base,
+        message: privateMessage,
+        data: { custom_id: "review:refresh:1:0" },
+      },
+      6,
+    );
+    await run(
+      {
+        ...base,
+        message: privateMessage,
+        data: { custom_id: "review:menu:1:0", values: ["preview"] },
+      },
+      6,
+    );
+    assert.match(panelText(sent.at(-1).body), /Assessment summary/);
+    assert.equal(
+      nodes(sent.at(-1).body).filter((c) => c.type === 2).length,
+      1,
+      "Summary view has only a Back button",
+    );
+    await run(
+      {
+        ...base,
+        message: privateMessage,
+        data: { custom_id: "review:menu:1:0", values: ["refresh"] },
+      },
+      6,
+    );
+    assert.ok(sent.every((r) => r.url.endsWith("/messages/@original")));
+    assert.ok(sent.every((r) => r.body.flags === 32768));
   } finally {
     globalThis.fetch = originalFetch;
     await mf.dispose();
