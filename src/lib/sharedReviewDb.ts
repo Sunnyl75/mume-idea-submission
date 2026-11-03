@@ -476,3 +476,66 @@ export async function withdrawReviewChange(
       "Only the proposer can withdraw a pending request while the assessment is open.",
     );
 }
+
+export interface ReviewEvent {
+  id: number;
+  idea_id: number;
+  revision: number;
+  action: string;
+  actor_id: string;
+  actor_name: string;
+  snapshot: string;
+  reason: string;
+  at: number;
+  previous_snapshot: string | null;
+}
+export const HISTORY_PAGE_SIZE = 5;
+export async function assessmentHistory(
+  env: Env,
+  ideaId: number,
+  page = 0,
+  anchor = 0,
+) {
+  if (
+    !Number.isSafeInteger(page) ||
+    page < 0 ||
+    page > 1_000_000 ||
+    !Number.isSafeInteger(anchor) ||
+    anchor < 0
+  )
+    throw Error("Invalid history page.");
+  // Freeze the upper event id for stable navigation while other members vote.
+  const max = await env.DB.prepare(
+    "SELECT COALESCE(MAX(id),0) AS id FROM council_review_events WHERE idea_id=?",
+  )
+    .bind(ideaId)
+    .first<{ id: number }>();
+  const upper = anchor || max!.id;
+  const result = await env.DB.prepare(
+    `SELECT e.*,
+    (SELECT p.snapshot FROM council_review_events p WHERE p.idea_id=e.idea_id AND p.id<e.id
+      AND p.action NOT IN ('request_change','withdraw_change') ORDER BY p.id DESC LIMIT 1) AS previous_snapshot
+    FROM council_review_events e WHERE e.idea_id=? AND e.id<=? ORDER BY e.id DESC LIMIT ? OFFSET ?`,
+  )
+    .bind(ideaId, upper, HISTORY_PAGE_SIZE + 1, page * HISTORY_PAGE_SIZE)
+    .all<ReviewEvent>();
+  const rows = result.results ?? [];
+  return {
+    events: rows.slice(0, HISTORY_PAGE_SIZE),
+    hasNext: rows.length > HISTORY_PAGE_SIZE,
+    anchor: upper,
+  };
+}
+export async function assessmentEvent(
+  env: Env,
+  ideaId: number,
+  eventId: number,
+) {
+  if (!Number.isSafeInteger(eventId) || eventId <= 0)
+    throw Error("Invalid history entry.");
+  return env.DB.prepare(
+    "SELECT * FROM council_review_events WHERE idea_id=? AND id=?",
+  )
+    .bind(ideaId, eventId)
+    .first<ReviewEvent>();
+}

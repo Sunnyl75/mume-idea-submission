@@ -25,6 +25,8 @@ import {
   secondChecks,
   withdrawChecksSecond,
   canMarkReviewed,
+  assessmentHistory,
+  assessmentEvent,
 } from "../src/lib/sharedReviewDb.ts";
 import { updateIdeaAnswers, updateStatus } from "../src/lib/db.ts";
 import {
@@ -1161,6 +1163,247 @@ test("opening from the thread creates one private response; private controls and
     );
     assert.ok(sent.every((r) => r.url.endsWith("/messages/@original")));
     assert.ok(sent.every((r) => r.body.flags === 32768));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("history queries isolate ideas and keep pagination stable as new votes arrive", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial scores");
+    r = await getReview(env, idea);
+    for (const member of [A, B, C]) {
+      await agreeReview(env, r, member);
+      await withdrawAgreement(env, r, member);
+    }
+    const first = await assessmentHistory(env, 1);
+    assert.equal(first.events.length, 5);
+    assert.equal(first.hasNext, true);
+    assert.ok(first.events.some((e) => e.action === "withdraw_scores"));
+    await agreeReview(env, r, A);
+    const anchored = await assessmentHistory(env, 1, 0, first.anchor);
+    assert.deepEqual(
+      anchored.events.map((e) => e.id),
+      first.events.map((e) => e.id),
+    );
+    const second = await assessmentHistory(env, 1, 1, first.anchor);
+    assert.equal(second.events.length, 2);
+    assert.ok(second.events.every((e) => e.id < first.events.at(-1).id));
+    assert.equal(second.hasNext, false);
+    const empty = await assessmentHistory(env, 2);
+    assert.equal(empty.events.length, 0);
+    assert.equal(await assessmentEvent(env, 2, first.events[0].id), null);
+    await assert.rejects(assessmentHistory(env, 1, -1));
+    await assert.rejects(assessmentHistory(env, 1, 0, NaN));
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("history button shows votes, checks seconds and withdrawals in the same private panel without writing", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  let delivered;
+  globalThis.fetch = async (url, init) => {
+    assert.ok(
+      url.includes("/webhooks/") && url.endsWith("/messages/@original"),
+    );
+    assert.equal(init.method, "PATCH");
+    delivered = JSON.parse(init.body);
+    return new Response("{}");
+  };
+  const input = (id, roles = ["council"], channel = "private", values) => ({
+    type: 3,
+    guild_id: "guild",
+    channel_id: channel,
+    application_id: "app",
+    token: "token",
+    message: { id: "personal-panel", flags: 64 | 32768 },
+    member: { roles, user: { id: A.id, username: A.name } },
+    data: { custom_id: id, values },
+  });
+  async function run(i) {
+    let pending;
+    const ack = await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      i,
+    );
+    const body = await ack.json();
+    if (pending) await pending;
+    return { ack: body, payload: delivered };
+  }
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
+    r = await getReview(env, idea);
+    const d = JSON.parse(r.draft);
+    d.issues = ["clarity"];
+    d.issueReason = "Clarify this";
+    await directEditReview(env, r, idea, d, A, "Flag clarity");
+    r = await getReview(env, idea);
+    await secondChecks(env, r, B);
+    await withdrawChecksSecond(env, r, B);
+    await agreeReview(env, r, C);
+    await withdrawAgreement(env, r, C);
+    const before = await getReview(env, idea);
+    const eventCount = await env.DB.prepare(
+      "SELECT COUNT(*) n FROM council_review_events",
+    ).first();
+    const panel = await reviewPayload(env, idea, r, A.id);
+    assert.equal(
+      nodes(panel).filter((c) => c.label === "Assessment history").length,
+      1,
+    );
+    const { ack, payload } = await run(input(`review:history:1:${r.revision}`));
+    assert.equal(ack.type, 6);
+    const history = panelText(payload);
+    assert.match(history, /Carol.*Withdrew score agreement/);
+    assert.match(history, /Carol.*Agreed with final scores/);
+    assert.match(history, /Bob.*Withdrew their checks second/);
+    assert.match(history, /Bob.*Seconded the selected checks/);
+    assert.match(history, /<t:\d+:f>/);
+    assert.match(history, /14\/20/);
+    assert.ok(nodes(payload).length <= 40);
+    assert.ok(history.length < 4000);
+    const selector = nodes(payload).find((c) =>
+      c.custom_id?.includes(":historyevent:"),
+    );
+    const details = (
+      await run(
+        input(selector.custom_id, ["council"], "private", [
+          selector.options[0].value,
+        ]),
+      )
+    ).payload;
+    assert.match(panelText(details), /full snapshot/);
+    assert.match(panelText(details), /Useful/);
+    assert.deepEqual(await getReview(env, idea), before);
+    assert.deepEqual(
+      await env.DB.prepare(
+        "SELECT COUNT(*) n FROM council_review_events",
+      ).first(),
+      eventCount,
+    );
+    assert.equal((await agreements(env, r)).length, 0);
+    const denied = await run(input(`review:history:1:${r.revision}`, []));
+    assert.match(denied.ack.data.content, /Only White Council/);
+    const wrongThread = await run(
+      input(`review:history:1:${r.revision}`, ["council"], "public"),
+    );
+    assert.match(panelText(wrongThread.payload), /private Council/);
+    const older = nodes(payload).find((c) => c.label === "Older");
+    const oldPage = (await run(input(older.custom_id))).payload;
+    assert.match(panelText(oldPage), /not assessed → 4\/5/);
+    // History remains readable after closing/resolving and from an older panel.
+    await env.DB.prepare("UPDATE ideas SET status='resolved' WHERE id=1").run();
+    await env.DB.prepare(
+      "UPDATE council_reviews SET status='published' WHERE idea_id=1",
+    ).run();
+    assert.match(
+      panelText((await run(input("review:history:1:0"))).payload),
+      /Assessment history/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("proposal history compares against applied snapshots and long event details are paginated without losing text", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  let delivered;
+  globalThis.fetch = async (_url, init) => {
+    delivered = JSON.parse(init.body);
+    return new Response("{}");
+  };
+  async function run(id, values) {
+    let pending;
+    await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      {
+        type: 3,
+        guild_id: "guild",
+        channel_id: "private",
+        application_id: "app",
+        token: "token",
+        message: { flags: 64 | 32768 },
+        member: { roles: ["council"], user: { id: A.id, username: A.name } },
+        data: { custom_id: id, values },
+      },
+    );
+    await pending;
+    return delivered;
+  }
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
+    r = await getReview(env, idea);
+    const proposed = JSON.parse(r.draft);
+    proposed.scores.usefulness = 5;
+    await saveOrRequestChange(env, r, idea, proposed, B, "First proposal");
+    const [request] = await reviewChanges(env, 1);
+    const competing = JSON.parse(r.draft);
+    competing.scores.usefulness = 2;
+    await saveOrRequestChange(env, r, idea, competing, C, "Competing proposal");
+    const history = await run(`review:history:1:${r.revision}`);
+    const select = nodes(history).find((c) =>
+      c.custom_id?.includes(":historyevent:"),
+    );
+    const snapshot = await run(select.custom_id, [select.options[0].value]);
+    assert.match(panelText(snapshot), /Proposed snapshot/);
+    await applyReviewChange(env, r, idea, request.id, A);
+    r = await getReview(env, idea);
+    const applied = (await assessmentHistory(env, 1)).events[0];
+    assert.equal(
+      JSON.parse(applied.previous_snapshot).scores.usefulness,
+      4,
+      "Pending proposals are not the applied baseline",
+    );
+    assert.match(
+      panelText(await run(`review:history:1:${r.revision}`)),
+      /Usefulness: 4\/5 → 5\/5/,
+    );
+    const large = complete();
+    for (const key of Object.keys(large.reasons))
+      large.reasons[key] = "R".repeat(500);
+    large.issues = ["clarity"];
+    large.issueReason = "I".repeat(1000);
+    large.note = "N".repeat(1000);
+    await directEditReview(env, r, idea, large, B, "Z".repeat(1000));
+    r = await getReview(env, idea);
+    const listing = await run(`review:history:1:${r.revision}`);
+    assert.ok(panelText(listing).length < 4000);
+    const options = nodes(listing).find((c) =>
+      c.custom_id?.includes(":historyevent:"),
+    );
+    const first = await run(options.custom_id, [options.options[0].value]);
+    assert.match(panelText(first), /Part 1\/2/);
+    const next = nodes(first).find((c) => c.label === "Next part");
+    const second = await run(next.custom_id);
+    assert.match(panelText(second), /Part 2\/2/);
+    assert.ok(
+      panelText(first).length < 4000 && panelText(second).length < 4000,
+    );
+    const all = panelText(first) + panelText(second);
+    assert.ok(
+      all.includes("Z".repeat(1000)),
+      "The full audit reason remains readable",
+    );
+    assert.deepEqual(first.allowed_mentions, { parse: [] });
   } finally {
     globalThis.fetch = originalFetch;
     await mf.dispose();

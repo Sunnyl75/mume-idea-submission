@@ -61,6 +61,25 @@ and request-detail views replace this panel and have a Back button. Merely openi
 Assess idea again creates another personal panel. Assessments stay Council-only;
 a member writes the eventual player-facing response separately.
 
+### Assessment history
+
+**Assessment history** opens a Council-only, read-only log in the same private
+panel. Entries show the recorded member name, date/time, revision, action and
+reason. Score/check edits show before/after values. Votes and withdrawals show
+which scores or checks were being endorsed at that event. Change requests are
+explicitly labelled as proposals until applied.
+
+The log shows five events per page, newest first, with **Older** / **Newer**
+navigation. Opening the history pins its latest event so new votes do not shift
+entries between pages; return to the assessment and reopen history to include new
+events. Use **View full assessment at an event** to read the complete saved scores,
+explanations, checks and reason. Long snapshots have previous/next parts. **Back to
+assessment** returns to the current panel. History remains available for closed or
+resolved ideas and viewing it does not change assessments, votes or audit records.
+
+This reads existing shared-assessment events; it needs no new migration and does
+not reconstruct events that were never recorded by an older bot version.
+
 The existing In Proposal / Final Draft / Submitted / Reviewed / Resolved status
 workflow stays separate. Closing an assessment does not change the idea status.
 **Marking an idea Reviewed is blocked until three Council members have agreed to

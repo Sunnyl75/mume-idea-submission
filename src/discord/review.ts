@@ -9,6 +9,7 @@ import {
   draftResult,
   feedbackFor,
   AGREEMENTS_REQUIRED,
+  emptyDraft,
   checksAgreed,
   readyToClose,
 } from "../lib/sharedReview";
@@ -27,8 +28,10 @@ import {
   saveOrRequestChange,
   applyReviewChange,
   withdrawReviewChange,
+  assessmentHistory,
+  assessmentEvent,
 } from "../lib/sharedReviewDb";
-import type { SharedReview } from "../lib/sharedReviewDb";
+import type { SharedReview, ReviewEvent } from "../lib/sharedReviewDb";
 import { discordFetch, discordJson } from "./rest";
 interface ModalField {
   type?: number;
@@ -294,6 +297,7 @@ export async function reviewPayload(
             ),
         ),
       ),
+      row(button("Assessment history", cid("history"))),
       row({
         type: 3,
         custom_id: cid("menu"),
@@ -325,6 +329,184 @@ function inputs(i: ReviewInteraction) {
     fieldsOf(i)
       .filter((c) => typeof c.value === "string")
       .map((c) => [c.custom_id!, c.value!]),
+  );
+}
+function historyAction(action: string): string {
+  const labels: Record<string, string> = {
+    start: "Started the assessment",
+    revise: "Changed the assessment",
+    agree_scores: "Agreed with final scores",
+    withdraw_scores: "Withdrew score agreement",
+    second_checks: "Seconded the selected checks",
+    withdraw_checks_second: "Withdrew their checks second",
+    request_change: "Requested a change",
+    withdraw_change: "Withdrew a change request",
+    apply_change: "Accepted / backed and applied a change",
+    publish: "Closed and recorded the assessment",
+    reopen: "Reopened the assessment",
+    agree: "Agreed with the assessment (earlier workflow)",
+    withdraw: "Withdrew assessment agreement (earlier workflow)",
+  };
+  return labels[action] || action.replace(/_/g, " ");
+}
+function scoreLine(d: ReviewDraft): string {
+  return CRITERIA.map(
+    (c) =>
+      `${c.name}${c.weight === 2 ? " ×2" : ""}: ${d.scores[c.id] === null ? "not assessed" : d.scores[c.id] + "/5"}`,
+  ).join(" · ");
+}
+function eventSummary(e: ReviewEvent): string {
+  const d: ReviewDraft = JSON.parse(e.snapshot);
+  const previous: ReviewDraft = e.previous_snapshot
+    ? JSON.parse(e.previous_snapshot)
+    : emptyDraft();
+  const details: string[] = [];
+  if (["revise", "apply_change", "request_change"].includes(e.action)) {
+    for (const c of CRITERIA) {
+      const old = previous.scores[c.id],
+        next = d.scores[c.id];
+      if (old !== next)
+        details.push(
+          `${c.name}: ${old === null ? "not assessed" : old + "/5"} → ${next === null ? "not assessed" : next + "/5"}`,
+        );
+      else if ((previous.reasons[c.id] || "") !== (d.reasons[c.id] || ""))
+        details.push(`${c.name}: explanation changed`);
+    }
+    const checks = (draft: ReviewDraft) =>
+      CHECKS.filter((c) => draft.issues.includes(c.id))
+        .map((c) => c.name)
+        .join(", ") || "none";
+    if (checks(previous) !== checks(d))
+      details.push(`Checks: ${checks(previous)} → ${checks(d)}`);
+    else if (previous.issueReason !== d.issueReason)
+      details.push("Checks explanation changed");
+    if (previous.note !== d.note) details.push("Response guidance changed");
+  } else if (
+    ["agree_scores", "withdraw_scores", "agree", "withdraw"].includes(e.action)
+  ) {
+    const total = draftResult(d).total;
+    details.push(scoreLine(d) + (total === null ? "" : ` · ${total}/20`));
+  } else if (["second_checks", "withdraw_checks_second"].includes(e.action)) {
+    details.push(
+      CHECKS.filter((c) => d.issues.includes(c.id))
+        .map((c) => c.name)
+        .join(", ") || "No selected checks",
+    );
+  }
+  const reason =
+    e.reason && e.action !== "publish"
+      ? `\nReason: ${escape(e.reason).slice(0, 500)}${e.reason.length > 500 ? "…" : ""}`
+      : "";
+  return `**${escape(e.actor_name)}** · ${historyAction(e.action)}\n<t:${e.at}:f> · Revision ${e.revision}${details.length ? "\n" + escape(details.join("\n")).slice(0, 1200) : ""}${reason}`;
+}
+async function historyPayload(
+  env: Env,
+  idea: IdeaRow,
+  r: SharedReview,
+  page: number,
+  anchor: number,
+) {
+  const history = await assessmentHistory(env, idea.id, page, anchor);
+  const cid = (op: string, targetPage = page) =>
+    `review:${op}:${idea.id}:${r.revision}:${targetPage}:${history.anchor}`;
+  const controls = [
+    ...(history.events.length
+      ? [
+          row({
+            type: 3,
+            custom_id: cid("historyevent"),
+            placeholder: "View full assessment at an event",
+            min_values: 1,
+            max_values: 1,
+            options: history.events.map((e) => ({
+              label: `${e.actor_name} · ${historyAction(e.action)}`.slice(
+                0,
+                100,
+              ),
+              value: String(e.id),
+              description: `Event #${e.id} · Revision ${e.revision}`,
+            })),
+          }),
+        ]
+      : []),
+    row(
+      button("Newer", cid("history", Math.max(0, page - 1)), 2, page === 0),
+      button("Older", cid("history", page + 1), 2, !history.hasNext),
+      button("Back to assessment", `review:refresh:${idea.id}:0`),
+    ),
+  ];
+  return panel([
+    text(
+      `## Assessment history · Idea #${idea.id}\nNewest first · Page ${page + 1} · Read-only`,
+    ),
+    ...(history.events.length
+      ? history.events.map((e) => {
+          const summary = eventSummary(e);
+          return box(
+            text(
+              summary.length > 600
+                ? summary.slice(0, 540) +
+                    "…\nSelect this event for full details."
+                : summary,
+            ),
+          );
+        })
+      : [text("No assessment history has been recorded yet.")]),
+    ...controls,
+  ]);
+}
+async function historyEventPayload(
+  env: Env,
+  idea: IdeaRow,
+  r: SharedReview,
+  eventId: number,
+  page: number,
+  anchor: number,
+  part = 0,
+) {
+  const e = await assessmentEvent(env, idea.id, eventId);
+  if (!e || (anchor && eventId > anchor))
+    throw Error("This history entry is unavailable for this idea.");
+  const d: ReviewDraft = JSON.parse(e.snapshot);
+  const details = CRITERIA.map(
+    (c) =>
+      `**${c.name}${c.weight === 2 ? " ×2" : ""}: ${d.scores[c.id] === null ? "not assessed" : d.scores[c.id] + "/5"}**\n${escape(d.reasons[c.id] || "No explanation recorded")}`,
+  ).join("\n\n");
+  const checks =
+    CHECKS.filter((c) => d.issues.includes(c.id))
+      .map((c) => c.name)
+      .join(", ") || "None";
+  const body = `**${historyAction(e.action)}** by **${escape(e.actor_name)}**\nMember ID: ${escape(e.actor_id)}\n<t:${e.at}:f> · Revision ${e.revision} · Event #${e.id}\n${["request_change", "withdraw_change"].includes(e.action) ? "Proposed snapshot — this event does not apply it to the assessment." : "Assessment snapshot at this event."}\n\n${details}\n\n**Checks:** ${checks}\n${escape(d.issueReason)}${d.note ? "\n\n**Previous response guidance**\n" + escape(d.note) : ""}\n\n**Recorded reason:** ${escape(e.reason || "None")}`;
+  const chunks = Math.max(1, Math.ceil(body.length / 3000));
+  if (!Number.isSafeInteger(part) || part < 0 || part >= chunks)
+    throw Error("Invalid snapshot page.");
+  const partId = (n: number) =>
+    `review:historysnapshot:${idea.id}:${r.revision}:${page}:${anchor}:${eventId}:${n}`;
+  return summaryPanel(
+    `Assessment history — full snapshot${chunks > 1 ? ` · Part ${part + 1}/${chunks}` : ""}`,
+    body.slice(part * 3000, (part + 1) * 3000),
+    [
+      ...(chunks > 1
+        ? [
+            row(
+              button(
+                "Previous part",
+                partId(Math.max(0, part - 1)),
+                2,
+                part === 0,
+              ),
+              button("Next part", partId(part + 1), 2, part + 1 >= chunks),
+            ),
+          ]
+        : []),
+      row(
+        button(
+          "Back to history",
+          `review:history:${idea.id}:${r.revision}:${page}:${anchor}`,
+        ),
+        button("Back to assessment", `review:refresh:${idea.id}:0`),
+      ),
+    ],
   );
 }
 async function changePayload(
@@ -622,7 +804,15 @@ export async function handleReviewInteraction(
         if (!idea.review_thread_id || i.channel_id !== idea.review_thread_id)
           throw Error("Use the private Council review thread.");
         let r = await getReview(env, idea);
-        const readOnly = ["open", "refresh", "preview", "changes"].includes(op);
+        const readOnly = [
+          "open",
+          "refresh",
+          "preview",
+          "changes",
+          "history",
+          "historyevent",
+          "historysnapshot",
+        ].includes(op);
         if (!readOnly && (r.revision !== rev || idea.status === "resolved"))
           throw Error(
             "Assessment changed or idea resolved. Refresh or reopen the idea.",
@@ -706,6 +896,44 @@ export async function handleReviewInteraction(
           await reopen(env, r, idea, actor);
         } else if (!readOnly) throw Error("Unknown assessment action.");
         r = await getReview(env, idea);
+        if (["history", "historyevent", "historysnapshot"].includes(op)) {
+          const page = Number(parts[4] ?? 0),
+            anchor = Number(parts[5] ?? 0);
+          if (
+            !Number.isSafeInteger(page) ||
+            page < 0 ||
+            page > 1_000_000 ||
+            !Number.isSafeInteger(anchor) ||
+            anchor < 0
+          )
+            throw Error("Invalid history page.");
+          const selected = i.data?.values;
+          if (
+            op === "historyevent" &&
+            (i.type !== 3 ||
+              selected?.length !== 1 ||
+              !/^[1-9][0-9]*$/.test(selected[0]))
+          )
+            throw Error("Choose one history entry.");
+          const payload =
+            op === "history"
+              ? await historyPayload(env, idea, r, page, anchor)
+              : await historyEventPayload(
+                  env,
+                  idea,
+                  r,
+                  Number(op === "historysnapshot" ? parts[6] : selected![0]),
+                  page,
+                  anchor,
+                  Number(op === "historysnapshot" ? parts[7] : 0),
+                );
+          await discordFetch(env, webhook, {
+            method: "PATCH",
+            unauthenticated: true,
+            body: payload,
+          });
+          return;
+        }
         if (op === "changes") {
           const page = Number(parts[4] ?? 0);
           if (!Number.isSafeInteger(page) || page < 0)
