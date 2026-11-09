@@ -76,6 +76,22 @@ and request-detail views replace this panel and have a Back button. Merely openi
 Assess idea again creates another personal panel. Assessments stay Council-only;
 a member writes the eventual player-facing response separately.
 
+### Rubric and response guidance
+
+The response summary starts with the recommendation and its main feedback sentence,
+then lists each selected score and the corresponding full rubric description.
+Reviewer-written explanations appear separately under **Council notes**, so they
+never replace the rubric text. The private thread's **Current assessment** box
+includes both response guidance and the selected rubric descriptions, as does the
+Scores section of the personal panel. Blocking checks still take priority, with
+score/rubric context retained for writing the response.
+
+The dropdown uses a shortened description only when needed for Discord's
+100-character option limit. Summaries show the full approved wording. Existing
+recorded messages are historical records; reopen the assessment panel to refresh
+the head-of-thread box and use **Review summary** to see the new format with the
+existing scores. Newly recorded assessments use that format too.
+
 ### Assessment history
 
 **Assessment history** opens a Council-only, read-only log in the same private

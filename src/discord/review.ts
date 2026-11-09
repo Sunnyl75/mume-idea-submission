@@ -148,12 +148,22 @@ export async function assessmentSummaryEmbed(
     !stale && checksAgreed(d, r.checks_proposer_id, r.checks_seconder_id);
   const fields = [
     {
-      name: "Current scores",
+      name: "Response guidance",
+      value: result.flags.length
+        ? CHECKS.filter((c) => d.issues.includes(c.id))
+            .map((c) => `${c.action}: ${c.feedback}`)
+            .join("\n")
+        : result.band
+          ? result.band.feedback
+          : "Complete the scores to produce response guidance.",
+    },
+    {
+      name: "Current scores and rubric",
       value:
         CRITERIA.map(
           (c) =>
-            `${c.name}${c.weight === 2 ? " ×2" : ""}: **${d.scores[c.id] === null ? "not scored" : d.scores[c.id] + "/5"}**`,
-        ).join(" · ") +
+            `${c.name}${c.weight === 2 ? " ×2" : ""}: **${d.scores[c.id] === null ? "not scored" : d.scores[c.id] + "/5"}**${d.scores[c.id] === null ? "" : "\n" + c.levels[d.scores[c.id]! - 1]}`,
+        ).join("\n\n") +
         (result.total === null
           ? ""
           : `\n**Total: ${result.total}/20**${result.band ? " · " + result.band.name : ""}`),
@@ -343,7 +353,11 @@ export async function reviewPayload(
     ),
     box(
       text(
-        `### Scores\n${scores}\n${resultLine}\n**${votes.length}/${AGREEMENTS_REQUIRED} agreements**${
+        `### Scores\n${scores}\n${resultLine}\n${result.band ? result.band.feedback + "\n" : ""}${CRITERIA.filter(
+          (c) => draft.scores[c.id] !== null,
+        )
+          .map((c) => `**${c.name}:** ${c.levels[draft.scores[c.id]! - 1]}`)
+          .join("\n")}\n**${votes.length}/${AGREEMENTS_REQUIRED} agreements**${
           votes.length
             ? " · " +
               votes
@@ -922,7 +936,8 @@ export async function handleReviewInteraction(
                 options: c.levels.map((level, j) => ({
                   label: String(j + 1),
                   value: String(j + 1),
-                  description: level,
+                  description:
+                    level.length > 100 ? level.slice(0, 99) + "…" : level,
                   default: d.scores[c.id] === j + 1,
                 })),
               },

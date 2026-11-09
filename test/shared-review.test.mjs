@@ -53,6 +53,7 @@ const panelText = (p) =>
     .filter((c) => c.type === 10)
     .map((c) => c.content)
     .join("\n");
+import { CRITERIA, BANDS } from "../src/lib/rubric.ts";
 const A = { id: "A", name: "Alice" },
   B = { id: "B", name: "Bob" },
   C = { id: "C", name: "Carol" };
@@ -416,6 +417,13 @@ test("native recording: private Council summary, frozen result, retry without du
     await pending;
     assert.equal(posts, 1);
     assert.match(posted.embeds[0].description, /Recommended · 14\/20/);
+    for (const c of CRITERIA)
+      assert.ok(
+        posted.embeds[0].description.includes(
+          c.levels[complete().scores[c.id] - 1],
+        ),
+        "Recorded summary includes the selected rubric wording",
+      );
     assert.deepEqual(posted.allowed_mentions, { parse: [] });
     assert.equal(posted.enforce_nonce, true);
     assert.ok(posted.nonce.length <= 25);
@@ -1513,7 +1521,10 @@ test("changes require explanations; requests do not vote until applied and seed 
       summary.fields.find((f) => f.name === "Changes awaiting review").value,
       /1 score change.*Bob/s,
     );
-    assert.match(summary.fields[0].value, /Feasibility ×2: \*\*3\/5/);
+    assert.match(
+      summary.fields.find((f) => f.name === "Current scores and rubric").value,
+      /Feasibility ×2: \*\*3\/5/,
+    );
     await applyReviewChange(env, r, idea, request.id, C);
     r = await getReview(env, idea);
     assert.deepEqual(
@@ -1819,6 +1830,96 @@ test("failed or stale score submissions cannot leave a new agreement or overwrit
     );
     assert.equal((await agreements(env, current)).length, 3);
     assert.equal((await getReview(env, idea)).draft, current.draft);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("response guidance leads with the recommendation, includes the selected rubric and separates reviewer notes", () => {
+  const d = complete();
+  d.scores = { usefulness: 3, feasibility: 4, interest: 4 };
+  d.reasons = {
+    usefulness: "sdfgyhu",
+    feasibility: "awsedrfghj",
+    interest: "sdfghj",
+  };
+  const text = feedbackFor({ id: 1, title: "Example" }, d);
+  assert.match(text, /Recommended · 15\/20/);
+  const main =
+    "Scores well overall. We recommend considering it for implementation.";
+  assert.ok(text.indexOf(main) < text.indexOf("Usefulness: 3/5"));
+  assert.match(
+    text,
+    /Usefulness: 3\/5\nThis would provide a worthwhile improvement for a defined group of players\./,
+  );
+  assert.match(
+    text,
+    /Feasibility: 4\/5 \(×2\)\nThis would require relatively little work, with a small number of contained changes\./,
+  );
+  assert.match(
+    text,
+    /Interest: 4\/5\nThere is strong interest across several groups of players\./,
+  );
+  assert.ok(
+    text.indexOf("Council notes:") > text.indexOf(CRITERIA[2].levels[3]),
+  );
+  assert.ok(text.indexOf("sdfgyhu") > text.indexOf("Council notes:"));
+  const untouched = JSON.stringify(d);
+  for (let u = 1; u <= 5; u++)
+    for (let f = 1; f <= 5; f++)
+      for (let i = 1; i <= 5; i++) {
+        const draft = {
+          ...emptyDraft(),
+          scores: { usefulness: u, feasibility: f, interest: i },
+        };
+        const output = feedbackFor({ id: 1, title: "All score levels" }, draft);
+        for (const c of CRITERIA)
+          assert.ok(output.includes(c.levels[draft.scores[c.id] - 1]));
+        assert.ok(
+          !output.includes("Council notes:"),
+          "No invented explanations for initial scores",
+        );
+      }
+  assert.equal(
+    JSON.stringify(d),
+    untouched,
+    "Generating feedback must not rewrite recorded assessment data",
+  );
+  d.issues = ["clarity"];
+  d.issueReason = "Clarify the proposal";
+  const blocked = feedbackFor({ id: 1, title: "Blocked" }, d);
+  assert.match(blocked, /Further action required/);
+  assert.ok(
+    blocked.includes(CRITERIA[0].levels[2]),
+    "Rubric context remains visible with blocking checks",
+  );
+  assert.ok(
+    !blocked.includes("Recommended ·"),
+    "Checks override the recommendation",
+  );
+});
+
+test("the permanent assessment box and scoring panel both include response guidance and selected rubric wording", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial");
+    r = await getReview(env, idea);
+    const summary = await assessmentSummaryEmbed(env, idea, r);
+    assert.equal(
+      summary.fields.find((f) => f.name === "Response guidance").value,
+      BANDS.find((b) => b.max === 16).feedback,
+    );
+    const wording = summary.fields.find(
+      (f) => f.name === "Current scores and rubric",
+    ).value;
+    const panel = panelText(await reviewPayload(env, idea, r, A.id));
+    for (const c of CRITERIA) {
+      const level = c.levels[complete().scores[c.id] - 1];
+      assert.ok(wording.includes(level));
+      assert.ok(panel.includes(level));
+    }
+    for (const field of summary.fields) assert.ok(field.value.length <= 1024);
   } finally {
     await mf.dispose();
   }

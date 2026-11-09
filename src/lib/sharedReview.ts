@@ -111,16 +111,24 @@ export function feedbackFor(
   if (r.flags.length) {
     lines.push("Further action required");
     for (const c of r.flags) lines.push(`${c.action}: ${c.feedback}`);
-    lines.push(`Council explanation: ${d.issueReason}`);
   } else if (r.band) {
-    lines.push(`${r.band.name} · ${r.total}/20`);
-    for (const c of CRITERIA)
-      lines.push(
-        `${c.name}: ${d.scores[c.id]}/5${c.weight === 2 ? " (×2)" : ""} — ${d.reasons[c.id]?.trim() || "Initial score; no explanation required."}`,
-      );
-    lines.push(r.band.feedback);
+    lines.push(`${r.band.name} · ${r.total}/20`, r.band.feedback);
   } else lines.push("Draft — scores incomplete.");
-  if (d.note.trim()) lines.push(d.note.trim());
+  for (const c of CRITERIA) {
+    const score = d.scores[c.id];
+    lines.push(
+      score === null
+        ? `${c.name}: not assessed`
+        : `${c.name}: ${score}/5${c.weight === 2 ? " (×2)" : ""}\n${c.levels[score - 1]}`,
+    );
+  }
+  const notes = CRITERIA.filter((c) => d.reasons[c.id]?.trim()).map(
+    (c) => `${c.name}: ${d.reasons[c.id].trim()}`,
+  );
+  if (d.issues.length && d.issueReason.trim())
+    notes.push(`Checks: ${d.issueReason.trim()}`);
+  if (d.note.trim()) notes.push(d.note.trim());
+  if (notes.length) lines.push("Council notes:\n" + notes.join("\n"));
   lines.push("A recommendation does not guarantee implementation.");
   return lines.join("\n\n");
 }
