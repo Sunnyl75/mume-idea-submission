@@ -51,7 +51,11 @@ export function readyToClose(
 ): boolean {
   const result = draftResult(d);
   if (result.flags.length)
-    return result.ready && checksAgreed(d, proposer, seconder);
+    return (
+      result.total !== null &&
+      result.ready &&
+      checksAgreed(d, proposer, seconder)
+    );
   return result.total !== null && scoreVotes >= AGREEMENTS_REQUIRED;
 }
 export function validateDraft(d: ReviewDraft): void {
@@ -62,10 +66,10 @@ export function validateDraft(d: ReviewDraft): void {
     if (v !== null && (!Number.isInteger(v) || v < 1 || v > 5))
       throw Error("Scores must be 1–5, or blank.");
     if (
-      v !== null &&
-      (!d.reasons[c.id]?.trim() || d.reasons[c.id].length > 500)
+      d.reasons[c.id] !== undefined &&
+      (typeof d.reasons[c.id] !== "string" || d.reasons[c.id].length > 500)
     )
-      throw Error("Explain each score (up to 500 characters).");
+      throw Error("Score explanations must be at most 500 characters.");
   }
   if (
     d.issues.length > CHECKS.length ||
@@ -112,7 +116,7 @@ export function feedbackFor(
     lines.push(`${r.band.name} · ${r.total}/20`);
     for (const c of CRITERIA)
       lines.push(
-        `${c.name}: ${d.scores[c.id]}/5${c.weight === 2 ? " (×2)" : ""} — ${d.reasons[c.id]}`,
+        `${c.name}: ${d.scores[c.id]}/5${c.weight === 2 ? " (×2)" : ""} — ${d.reasons[c.id]?.trim() || "Initial score; no explanation required."}`,
       );
     lines.push(r.band.feedback);
   } else lines.push("Draft — scores incomplete.");

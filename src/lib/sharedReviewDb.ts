@@ -113,6 +113,7 @@ async function commitRevision(
   actor: Reviewer,
   reason: string,
   request?: ReviewChange,
+  submitScores = false,
 ): Promise<void> {
   validateDraft(draft);
   if (!reason.trim() || reason.length > 1000)
@@ -135,6 +136,9 @@ async function commitRevision(
     ? `EXISTS(SELECT 1 FROM council_review_changes q WHERE q.id=? AND q.idea_id=council_reviews.idea_id AND q.base_revision=council_reviews.revision AND q.idea_content=council_reviews.idea_content AND q.status='pending' AND q.proposer_id!=?)`
     : `(author_id IS NULL OR author_id=?)`;
   const permissionArgs = request ? [request.id, actor.id] : [actor.id];
+  const autoAgree =
+    (submitScores || (!!request && scoresChanged)) &&
+    draftResult(draft).total !== null;
   const res = await env.DB.batch([
     env.DB.prepare(
       `UPDATE council_reviews SET draft=?,idea_content=?,revision=revision+1,
@@ -183,6 +187,21 @@ async function commitRevision(
           env.DB.prepare(
             `UPDATE council_review_changes SET status='applied',applied_by_id=?,applied_by_name=? WHERE id=? AND changes()=1`,
           ).bind(actor.id, actor.name, request.id),
+        ]
+      : []),
+    ...(autoAgree
+      ? [
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO council_score_agreements(idea_id,score_revision,actor_id,actor_name,at)
+        SELECT idea_id,score_revision,?,?,? FROM council_reviews WHERE idea_id=? AND revision=? AND status='open' AND changes()=1`,
+          ).bind(editor.id, editor.name, now(), r.idea_id, next.revision),
+          event(
+            env,
+            next,
+            "agree_scores",
+            editor,
+            "Submitted the current scores; counts as the first agreement",
+          ),
         ]
       : []),
   ]);
@@ -284,12 +303,18 @@ export async function withdrawChecksSecond(
 }
 export async function reservePublish(env: Env, r: SharedReview): Promise<void> {
   validateDraft(JSON.parse(r.draft));
-  if (!draftResult(JSON.parse(r.draft)).ready)
-    throw Error("Assessment incomplete.");
+  if (
+    !draftResult(JSON.parse(r.draft)).ready ||
+    draftResult(JSON.parse(r.draft)).total === null
+  )
+    throw Error("Please score all categories, or cancel.");
   const res = await env.DB.prepare(
     `UPDATE council_reviews SET status='publishing',updated_at=?
     WHERE idea_id=? AND revision=? AND status IN ('open','publishing') AND ${liveContentSql()}
     AND (SELECT status FROM ideas WHERE id=?)!='resolved'
+    AND json_type(draft,'$.scores.usefulness')='integer' AND json_extract(draft,'$.scores.usefulness') BETWEEN 1 AND 5
+    AND json_type(draft,'$.scores.feasibility')='integer' AND json_extract(draft,'$.scores.feasibility') BETWEEN 1 AND 5
+    AND json_type(draft,'$.scores.interest')='integer' AND json_extract(draft,'$.scores.interest') BETWEEN 1 AND 5
     AND (
       (json_array_length(json_extract(draft,'$.issues'))>0 AND checks_proposer_id IS NOT NULL
        AND checks_seconder_id IS NOT NULL AND checks_proposer_id!=checks_seconder_id)
@@ -390,10 +415,20 @@ export async function saveOrRequestChange(
   draft: ReviewDraft,
   actor: Reviewer,
   reason: string,
+  submitScores = false,
 ) {
   if (!r.author_id) throw Error("Click Start assessment first.");
   if (r.author_id === actor.id)
-    return editReview(env, r, idea, draft, actor, reason);
+    return commitRevision(
+      env,
+      r,
+      idea,
+      draft,
+      actor,
+      reason,
+      undefined,
+      submitScores,
+    );
   validateDraft(draft);
   if (!reason.trim() || reason.length > 1000)
     throw Error("Explain the requested change.");
@@ -538,4 +573,70 @@ export async function assessmentEvent(
   )
     .bind(ideaId, eventId)
     .first<ReviewEvent>();
+}
+
+// A completed historical assessment remains a prior submission after reopening.
+export async function hasSubmittedScores(
+  env: Env,
+  r: SharedReview,
+): Promise<boolean> {
+  if (draftResult(JSON.parse(r.draft)).total !== null) return true;
+  const row = await env.DB.prepare(
+    `SELECT 1 AS found FROM council_review_events WHERE idea_id=?
+    AND action NOT IN ('request_change','withdraw_change')
+    AND json_type(snapshot,'$.scores.usefulness')='integer' AND json_extract(snapshot,'$.scores.usefulness') BETWEEN 1 AND 5
+    AND json_type(snapshot,'$.scores.feasibility')='integer' AND json_extract(snapshot,'$.scores.feasibility') BETWEEN 1 AND 5
+    AND json_type(snapshot,'$.scores.interest')='integer' AND json_extract(snapshot,'$.scores.interest') BETWEEN 1 AND 5 LIMIT 1`,
+  )
+    .bind(r.idea_id)
+    .first();
+  return !!row;
+}
+export async function submitReviewScores(
+  env: Env,
+  r: SharedReview,
+  idea: IdeaRow,
+  scores: Record<string, number>,
+  actor: Reviewer,
+  explanation: string,
+) {
+  const draft: ReviewDraft = JSON.parse(r.draft);
+  for (const id of ["usefulness", "feasibility", "interest"])
+    if (!Number.isInteger(scores[id]) || scores[id] < 1 || scores[id] > 5)
+      throw Error("Please score all categories, or cancel.");
+  const changed = Object.keys(draft.scores).filter(
+    (id) => scores[id] !== draft.scores[id],
+  );
+  if (!changed.length) return;
+  const prior = await hasSubmittedScores(env, r);
+  if (explanation.length > 500)
+    throw Error("The reason must be at most 500 characters.");
+  const reason = explanation.trim();
+  if (prior && !reason)
+    throw Error("Explain why you are changing the submitted scores.");
+  for (const id of changed) {
+    draft.scores[id] = scores[id];
+    if (reason) draft.reasons[id] = reason;
+    else delete draft.reasons[id];
+  }
+  await saveOrRequestChange(
+    env,
+    r,
+    idea,
+    draft,
+    actor,
+    reason || "Initial scores submitted",
+    true,
+  );
+}
+export async function pendingReviewChanges(
+  env: Env,
+  r: SharedReview,
+): Promise<ReviewChange[]> {
+  const rows = await env.DB.prepare(
+    "SELECT * FROM council_review_changes WHERE idea_id=? AND base_revision=? AND idea_content=? AND status='pending' ORDER BY id",
+  )
+    .bind(r.idea_id, r.revision, r.idea_content)
+    .all<ReviewChange>();
+  return rows.results ?? [];
 }

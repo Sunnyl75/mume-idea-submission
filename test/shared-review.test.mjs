@@ -27,12 +27,16 @@ import {
   canMarkReviewed,
   assessmentHistory,
   assessmentEvent,
+  submitReviewScores,
+  hasSubmittedScores,
 } from "../src/lib/sharedReviewDb.ts";
 import { updateIdeaAnswers, updateStatus } from "../src/lib/db.ts";
 import {
   handleReviewInteraction,
   reviewPayload,
   reviewButton,
+  assessmentSummaryEmbed,
+  syncAssessmentSummary,
 } from "../src/discord/review.ts";
 function nodes(payload) {
   const out = [];
@@ -214,7 +218,10 @@ test("D1: three distinct final-score agreements, revisions, audit, stale ideas, 
     revised.scores.usefulness = 5;
     await editReview(env, r, idea, revised, B, "Updated feedback");
     r = await getReview(env, idea);
-    assert.equal((await agreements(env, r)).length, 0);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [B.id],
+    );
     assert.match(
       (
         await env.DB.prepare(
@@ -224,7 +231,7 @@ test("D1: three distinct final-score agreements, revisions, audit, stale ideas, 
       /Final feedback changed/,
     );
     await agreeReview(env, r, A);
-    await agreeReview(env, r, B);
+    await assert.rejects(agreeReview(env, r, B));
     await agreeReview(env, r, C);
     await updateIdeaAnswers(
       env,
@@ -532,7 +539,10 @@ test("checks: one second endorses the whole selection; approvals remain independ
     await editReview(env, r, idea, d, C, "More useful than first thought");
     r = await getReview(env, idea);
     assert.equal(r.score_revision, oldScoreRevision + 1);
-    assert.equal((await agreements(env, r)).length, 0);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [C.id],
+    );
     assert.equal(
       r.checks_seconder_id,
       B.id,
@@ -540,7 +550,7 @@ test("checks: one second endorses the whole selection; approvals remain independ
     );
     await agreeReview(env, r, A);
     await agreeReview(env, r, B);
-    await agreeReview(env, r, C);
+    await assert.rejects(agreeReview(env, r, C));
     d.note = "Internal response guidance";
     await editReview(env, r, idea, d, A, "Council note");
     r = await getReview(env, idea);
@@ -574,7 +584,7 @@ test("checks: one second endorses the whole selection; approvals remain independ
     await mf.dispose();
   }
 });
-test("selected checks can be recorded with one second, without voting on unfinished scores", async () => {
+test("selected checks still need complete scores before assessment submission", async () => {
   const { mf, env, idea } = await fixture();
   try {
     let r = await getReview(env, idea);
@@ -596,7 +606,7 @@ test("selected checks can be recorded with one second, without voting on unfinis
     );
     assert.equal(
       buttons.find((b) => b.custom_id?.includes(":publish:")).disabled,
-      false,
+      true,
     );
     assert.ok(payload.components.length <= 5);
     assert.ok(
@@ -604,6 +614,10 @@ test("selected checks can be recorded with one second, without voting on unfinis
         .filter((c) => c.type === 1)
         .every((row) => row.components.length <= 5),
     );
+    await assert.rejects(reservePublish(env, r), /score all categories/);
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    r = await getReview(env, idea);
+    assert.equal((await agreements(env, r)).length, 1);
     await reservePublish(env, r);
     await finishPublish(env, r, "internal-record", B);
     r = await getReview(env, idea);
@@ -731,7 +745,10 @@ test("editor lock: requests preserve the draft; author acceptance applies the ex
     assert.deepEqual(JSON.parse(r.draft), candidate);
     assert.equal(r.author_id, B.id);
     assert.equal(r.checks_seconder_id, C.id);
-    assert.equal((await agreements(env, r)).length, 0);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [B.id],
+    );
     assert.equal((await reviewChanges(env, idea.id))[0].applied_by_id, A.id);
     await assert.rejects(applyReviewChange(env, r, idea, request.id, C));
     const event = await env.DB.prepare(
@@ -923,12 +940,12 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
           throw Error("Modal needs immediate ACK");
         },
       },
-      interaction("scores", r.revision),
+      interaction("changescores", r.revision),
     );
     const body = await modal.json();
     assert.equal(body.type, 9);
-    assert.equal(body.data.components.length, 4);
-    for (const label of body.data.components.slice(0, 3)) {
+    assert.equal(body.data.components.length, 5);
+    for (const label of body.data.components.slice(1, 4)) {
       const select = label.component;
       assert.equal(select.type, 3);
       assert.deepEqual(
@@ -938,7 +955,7 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
       assert.ok(select.options.every((o) => o.description.length <= 100));
       assert.equal(select.options.filter((o) => o.default).length, 1);
     }
-    assert.equal(body.data.components[3].component.required, false);
+    assert.equal(body.data.components[4].component.required, false);
     await submit(
       interaction(
         "savescores",
@@ -957,7 +974,7 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
             interaction("savescores", r.revision, A, fields(invalid), 5),
           ),
         ),
-        /choose one score/,
+        /score all categories/,
       );
       assert.equal((await getReview(env, idea)).revision, r.revision);
     }
@@ -973,7 +990,7 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
           ),
         ),
       ),
-      /score changed/,
+      /changing the submitted scores/,
     );
     assert.equal((await agreements(env, r)).length, 3);
     for (const score of ["1", "2", "3", "4", "5"]) {
@@ -998,7 +1015,11 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
       ),
     );
     r = await getReview(env, idea);
-    assert.equal(JSON.parse(r.draft).scores.usefulness, null);
+    assert.equal(
+      JSON.parse(r.draft).scores.usefulness,
+      5,
+      "Incomplete input must not clear a saved score",
+    );
     const proposal = await submit(
       interaction(
         "savescores",
@@ -1020,7 +1041,10 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
     await submit(backing);
     r = await getReview(env, idea);
     assert.equal(r.author_id, B.id);
-    assert.equal((await agreements(env, r)).length, 0);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [B.id],
+    );
     assert.match(
       panelText(
         await submit(
@@ -1042,7 +1066,7 @@ test("compact panel uses bordered sections, adjacent approval pairs and no Inter
     let p = await reviewPayload(env, idea, r, A.id);
     assert.equal(p.flags, 32768);
     assert.deepEqual(p.embeds, []);
-    assert.equal(p.components.filter((c) => c.type === 17).length, 3);
+    assert.equal(p.components.filter((c) => c.type === 17).length, 4);
     assert.ok(nodes(p).length <= 40);
     assert.equal(
       nodes(p).filter((c) => c.type === 2 && c.label === "Score").length,
@@ -1367,7 +1391,9 @@ test("proposal history compares against applied snapshots and long event details
     assert.match(panelText(snapshot), /Proposed snapshot/);
     await applyReviewChange(env, r, idea, request.id, A);
     r = await getReview(env, idea);
-    const applied = (await assessmentHistory(env, 1)).events[0];
+    const applied = (await assessmentHistory(env, 1)).events.find(
+      (e) => e.action === "apply_change",
+    );
     assert.equal(
       JSON.parse(applied.previous_snapshot).scores.usefulness,
       4,
@@ -1406,6 +1432,394 @@ test("proposal history compares against applied snapshots and long event details
     assert.deepEqual(first.allowed_mentions, { parse: [] });
   } finally {
     globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("initial complete scoring needs no explanation and counts its submitter once; two more members reach quorum", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    await assert.rejects(
+      submitReviewScores(
+        env,
+        r,
+        idea,
+        { usefulness: 4, feasibility: 3 },
+        A,
+        "",
+      ),
+      /score all categories/,
+    );
+    assert.equal((await getReview(env, idea)).revision, r.revision);
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    r = await getReview(env, idea);
+    assert.deepEqual(JSON.parse(r.draft).reasons, {});
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [A.id],
+    );
+    await assert.rejects(agreeReview(env, r, A));
+    await assert.rejects(reservePublish(env, r));
+    await agreeReview(env, r, B);
+    await assert.rejects(reservePublish(env, r));
+    await agreeReview(env, r, C);
+    assert.equal(await canMarkReviewed(env, idea), true);
+    await reservePublish(env, r);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("changes require explanations; requests do not vote until applied and seed the proposer, not the backer", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    r = await getReview(env, idea);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
+    const changed = { ...complete().scores, feasibility: 5 };
+    await assert.rejects(
+      submitReviewScores(env, r, idea, changed, A, ""),
+      /Explain why/,
+    );
+    await assert.rejects(
+      submitReviewScores(env, r, idea, changed, B, ""),
+      /Explain why/,
+    );
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    assert.equal(
+      (await agreements(env, r)).length,
+      3,
+      "No-op submission must not reset votes",
+    );
+    await submitReviewScores(
+      env,
+      r,
+      idea,
+      changed,
+      B,
+      "This only changes one command",
+    );
+    const [request] = await reviewChanges(env, idea.id);
+    assert.equal((await agreements(env, r)).length, 3);
+    const summary = await assessmentSummaryEmbed(env, idea, r);
+    assert.match(
+      summary.fields.find((f) => f.name === "Changes awaiting review").value,
+      /1 score change.*Bob/s,
+    );
+    assert.match(summary.fields[0].value, /Feasibility ×2: \*\*3\/5/);
+    await applyReviewChange(env, r, idea, request.id, C);
+    r = await getReview(env, idea);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [B.id],
+    );
+    const automatic = (await assessmentHistory(env, idea.id)).events.find(
+      (e) => e.action === "agree_scores",
+    );
+    assert.equal(automatic.actor_id, B.id);
+    await withdrawAgreement(env, r, B);
+    await assessmentSummaryEmbed(env, idea, r);
+    assert.equal(
+      (await agreements(env, r)).length,
+      0,
+      "Reading must not reinstate a withdrawn agreement",
+    );
+    await assert.rejects(
+      submitReviewScores(env, r, idea, { ...changed, interest: 2 }, B, ""),
+      /Explain why/,
+    );
+    await submitReviewScores(
+      env,
+      r,
+      idea,
+      { ...changed, interest: 2 },
+      B,
+      "Less community support",
+    );
+    r = await getReview(env, idea);
+    assert.deepEqual(
+      (await agreements(env, r)).map((v) => v.id),
+      [B.id],
+    );
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("scoring modal distinguishes initial and changed scoring, requires all dropdowns and preserves selected values", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    const i = (op) => ({
+      type: 3,
+      guild_id: "guild",
+      channel_id: "private",
+      application_id: "app",
+      token: "token",
+      member: { roles: ["council"], user: { id: A.id, username: A.name } },
+      data: { custom_id: `review:${op}:1:${r.revision}` },
+    });
+    const ctx = {
+      waitUntil() {
+        throw Error("Modal must ACK immediately");
+      },
+    };
+    let modal = await (
+      await handleReviewInteraction(env, ctx, i("scores"))
+    ).json();
+    assert.equal(modal.type, 9);
+    assert.equal(modal.data.title, "Submit initial scores");
+    assert.match(
+      modal.data.components[0].content,
+      /Please score all categories, or cancel/,
+    );
+    assert.equal(modal.data.components.length, 4);
+    assert.ok(
+      !modal.data.components.some((c) => c.component?.custom_id === "reason"),
+    );
+    for (const c of modal.data.components.slice(1)) {
+      assert.equal(c.component.required, true);
+      assert.equal(c.component.min_values, 1);
+    }
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    r = await getReview(env, idea);
+    modal = await (
+      await handleReviewInteraction(env, ctx, i("changescores"))
+    ).json();
+    assert.equal(modal.data.title, "Submit changed scores");
+    for (const c of modal.data.components.slice(1, 4))
+      assert.equal(
+        Number(c.component.options.find((o) => o.default).value),
+        complete().scores[c.component.custom_id],
+      );
+    const p = await reviewPayload(env, idea, r, A.id);
+    assert.ok(nodes(p).find((c) => c.label === "Score").disabled);
+    assert.ok(
+      !nodes(p).find((c) => c.label === "Submit changed scores").disabled,
+    );
+    const headings = nodes(p)
+      .filter((c) => c.type === 10)
+      .map((c) => c.content);
+    assert.ok(
+      headings.findIndex((t) => t.startsWith("### Scores")) <
+        headings.findIndex((t) => t.startsWith("### Checks")),
+    );
+    const submit = nodes(p).find((c) => c.label === "Submit Assessment");
+    assert.equal(submit.style, 3);
+    assert.equal(submit.disabled, true);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
+    assert.equal(
+      nodes(await reviewPayload(env, idea, r, A.id)).find(
+        (c) => c.label === "Submit Assessment",
+      ).disabled,
+      false,
+    );
+    assert.equal(nodes(p).length <= 40, true);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("stable summary edits only the private starter, preserves the idea card and retries concurrent votes", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  const writes = [];
+  let extraVote = false;
+  try {
+    await env.DB.prepare(
+      "UPDATE ideas SET review_message_id='starter' WHERE id=1",
+    ).run();
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    r = await getReview(env, idea);
+    globalThis.fetch = async (url, init) => {
+      assert.equal(
+        url,
+        "https://discord.com/api/v10/channels/private/messages/starter",
+      );
+      if (init.method === "GET")
+        return Response.json({
+          embeds: [
+            { title: "Original idea", description: "Do not replace me" },
+            {
+              title: "Outdated",
+              footer: { text: "Current Council assessment" },
+            },
+          ],
+        });
+      assert.equal(init.method, "PATCH");
+      const body = JSON.parse(init.body);
+      writes.push(body);
+      assert.equal(
+        body.components,
+        undefined,
+        "Do not alter existing idea controls",
+      );
+      if (!extraVote) {
+        extraVote = true;
+        await agreeReview(env, r, B);
+      }
+      return Response.json({});
+    };
+    await syncAssessmentSummary(env, idea);
+    assert.equal(writes.length, 2);
+    const last = writes.at(-1);
+    assert.equal(last.embeds.length, 2);
+    assert.equal(last.embeds[0].title, "Original idea");
+    assert.match(
+      last.embeds[1].fields.find((f) => f.name === "Approval still needed")
+        .value,
+      /2\/3 agreements.*1 more required/s,
+    );
+    await syncAssessmentSummary(env, idea);
+    assert.equal(
+      writes.at(-1).embeds.length,
+      2,
+      "Reuse the same summary rather than appending new ones",
+    );
+    assert.deepEqual(last.allowed_mentions, { parse: [] });
+    await env.DB.prepare(
+      "UPDATE ideas SET review_thread_id=thread_id WHERE id=1",
+    ).run();
+    const count = writes.length;
+    await syncAssessmentSummary(env, idea);
+    assert.equal(
+      writes.length,
+      count,
+      "Never put assessment data on the public post",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("private creation and refresh keep the summary under the idea while public embeds stay idea-only", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const { createReviewPost, refreshIdeaPost } = await import(
+    "../src/discord/forum.ts"
+  );
+  const config = JSON.parse(readFileSync("seed/form-config.v1.json", "utf8"));
+  env.SUBMITTED_CHANNEL_ID = "review-forum";
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    return Response.json({ id: "new-review", message: { id: "starter" } });
+  };
+  try {
+    await createReviewPost(env, { ...idea, author_name: "Author" }, config);
+    assert.equal(calls[0].body.message.embeds.length, 2);
+    assert.equal(calls[0].body.message.embeds[1].title, "Current assessment");
+    calls.length = 0;
+    await refreshIdeaPost(
+      env,
+      {
+        ...idea,
+        author_name: "Author",
+        message_id: "public-starter",
+        review_message_id: "starter",
+      },
+      config,
+    );
+    assert.equal(
+      calls.find((c) =>
+        c.url.endsWith("/channels/public/messages/public-starter"),
+      ).body.embeds.length,
+      1,
+    );
+    assert.equal(
+      calls.find((c) => c.url.endsWith("/channels/private/messages/starter"))
+        .body.embeds.length,
+      2,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await mf.dispose();
+  }
+});
+
+test("long ideas and the stable assessment share Discord's 6000-character message budget", async () => {
+  const { withSummaryEmbed } = await import("../src/discord/embed.ts");
+  const original = {
+    title: "A long idea",
+    description: "D".repeat(3500),
+    fields: [
+      { name: "Details", value: "V".repeat(1024) },
+      { name: "More", value: "W".repeat(1024) },
+    ],
+  };
+  const summary = {
+    title: "Current assessment",
+    fields: [{ name: "State", value: "S".repeat(1000) }],
+  };
+  const count = (e) =>
+    (e.title?.length || 0) +
+    (e.description?.length || 0) +
+    (e.footer?.text?.length || 0) +
+    (e.author?.name?.length || 0) +
+    (e.fields || []).reduce((n, f) => n + f.name.length + f.value.length, 0);
+  const combined = withSummaryEmbed([original], summary);
+  assert.ok(combined.reduce((n, e) => n + count(e), 0) <= 6000);
+  assert.equal(
+    original.description.length,
+    3500,
+    "The source idea is not modified",
+  );
+  assert.equal(combined[1], summary);
+});
+
+test("failed or stale score submissions cannot leave a new agreement or overwrite the winning scores", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    await submitReviewScores(env, r, idea, complete().scores, A, "");
+    const current = await getReview(env, idea);
+    await assert.rejects(
+      submitReviewScores(
+        env,
+        r,
+        idea,
+        { ...complete().scores, interest: 5 },
+        A,
+        "Stale submission",
+      ),
+    );
+    assert.deepEqual(
+      (await agreements(env, current)).map((v) => v.id),
+      [A.id],
+    );
+    assert.equal((await getReview(env, idea)).draft, current.draft);
+    await agreeReview(env, current, B);
+    await agreeReview(env, current, C);
+    await reservePublish(env, current);
+    await assert.rejects(
+      submitReviewScores(
+        env,
+        current,
+        idea,
+        { ...complete().scores, interest: 5 },
+        A,
+        "During submission",
+      ),
+    );
+    assert.equal((await agreements(env, current)).length, 3);
+    assert.equal((await getReview(env, idea)).draft, current.draft);
+  } finally {
     await mf.dispose();
   }
 });
