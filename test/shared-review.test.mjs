@@ -53,7 +53,7 @@ const panelText = (p) =>
     .filter((c) => c.type === 10)
     .map((c) => c.content)
     .join("\n");
-import { CRITERIA, BANDS } from "../src/lib/rubric.ts";
+import { CRITERIA, BANDS, CHECKS } from "../src/lib/rubric.ts";
 const A = { id: "A", name: "Alice" },
   B = { id: "B", name: "Bob" },
   C = { id: "C", name: "Carol" };
@@ -366,7 +366,17 @@ test("native recording: private Council summary, frozen result, retry without du
   const originalFetch = globalThis.fetch;
   try {
     let r = await getReview(env, idea);
-    await editReview(env, r, idea, complete(), A, "Initial assessment");
+    await editReview(
+      env,
+      r,
+      idea,
+      {
+        ...complete(),
+        note: "Retain this accepted summary in the submission.",
+      },
+      A,
+      "Initial assessment",
+    );
     r = await getReview(env, idea);
     await agreeReview(env, r, A);
     await agreeReview(env, r, B);
@@ -424,6 +434,10 @@ test("native recording: private Council summary, frozen result, retry without du
         ),
         "Recorded summary includes the selected rubric wording",
       );
+    assert.match(
+      posted.embeds.map((e) => e.description).join(""),
+      /\*\*Summary:\*\* Retain this accepted summary in the submission\./,
+    );
     assert.deepEqual(posted.allowed_mentions, { parse: [] });
     assert.equal(posted.enforce_nonce, true);
     assert.ok(posted.nonce.length <= 25);
@@ -953,7 +967,7 @@ test("one Score modal edits all criteria; unchanged scores require no reason and
     const body = await modal.json();
     assert.equal(body.type, 9);
     assert.equal(body.data.components.length, 5);
-    for (const label of body.data.components.slice(1, 4)) {
+    for (const label of body.data.components.slice(0, 3)) {
       const select = label.component;
       assert.equal(select.type, 3);
       assert.deepEqual(
@@ -1590,14 +1604,14 @@ test("scoring modal distinguishes initial and changed scoring, requires all drop
     assert.equal(modal.type, 9);
     assert.equal(modal.data.title, "Submit initial scores");
     assert.match(
-      modal.data.components[0].content,
+      modal.data.components[0].description,
       /Please score all categories, or cancel/,
     );
     assert.equal(modal.data.components.length, 4);
     assert.ok(
       !modal.data.components.some((c) => c.component?.custom_id === "reason"),
     );
-    for (const c of modal.data.components.slice(1)) {
+    for (const c of modal.data.components.slice(0, 3)) {
       assert.equal(c.component.required, true);
       assert.equal(c.component.min_values, 1);
     }
@@ -1607,7 +1621,7 @@ test("scoring modal distinguishes initial and changed scoring, requires all drop
       await handleReviewInteraction(env, ctx, i("changescores"))
     ).json();
     assert.equal(modal.data.title, "Submit changed scores");
-    for (const c of modal.data.components.slice(1, 4))
+    for (const c of modal.data.components.slice(0, 3))
       assert.equal(
         Number(c.component.options.find((o) => o.default).value),
         complete().scores[c.component.custom_id],
@@ -1888,7 +1902,7 @@ test("response guidance leads with the recommendation, includes the selected rub
   d.issues = ["clarity"];
   d.issueReason = "Clarify the proposal";
   const blocked = feedbackFor({ id: 1, title: "Blocked" }, d);
-  assert.match(blocked, /Further action required/);
+  assert.match(blocked, /Checks Failed/);
   assert.ok(
     blocked.includes(CRITERIA[0].levels[2]),
     "Rubric context remains visible with blocking checks",
@@ -1907,7 +1921,7 @@ test("the permanent assessment box and scoring panel both include response guida
     r = await getReview(env, idea);
     const summary = await assessmentSummaryEmbed(env, idea, r);
     assert.equal(
-      summary.fields.find((f) => f.name === "Response guidance").value,
+      summary.fields.find((f) => f.name === "Summary: response guidance").value,
       BANDS.find((b) => b.max === 16).feedback,
     );
     const wording = summary.fields.find(
@@ -1920,6 +1934,144 @@ test("the permanent assessment box and scoring panel both include response guida
       assert.ok(panel.includes(level));
     }
     for (const field of summary.fields) assert.ok(field.value.length <= 1024);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("failed checks have a prominent heading, concrete next actions and a labelled seconded summary", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    const d = {
+      ...complete(),
+      issues: CHECKS.map((c) => c.id),
+      issueReason: "Ask the original poster for two examples.",
+      note: "Hold until the missing details arrive.",
+    };
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, d, A, "Check issues");
+    r = await getReview(env, idea);
+    await secondChecks(env, r, B);
+    r = await getReview(env, idea);
+    const output = feedbackFor(idea, JSON.parse(r.draft));
+    assert.ok(output.includes("## __**Checks Failed**__"));
+    assert.ok(!output.includes("Further action required"));
+    assert.ok(output.includes("**Summary:** " + d.issueReason));
+    assert.ok(output.includes("**Summary:** " + d.note));
+    for (const c of CHECKS)
+      assert.ok(output.includes(c.action + ": " + c.feedback));
+    const summary = await assessmentSummaryEmbed(env, idea, r);
+    assert.match(summary.description, /__\*\*Checks Failed\*\*__/);
+    assert.ok(summary.fields.every((f) => f.value.length <= 1024));
+    assert.equal(
+      summary.fields.find((f) => f.name === "Summary").value,
+      d.note,
+    );
+    assert.ok(
+      panelText(await reviewPayload(env, idea, r, A.id)).includes(
+        "__**Checks Failed**__",
+      ),
+    );
+    const history = await assessmentHistory(env, idea.id);
+    assert.ok(
+      history.events.some(
+        (e) =>
+          e.action === "second_checks" &&
+          JSON.parse(e.snapshot).issueReason === d.issueReason,
+      ),
+    );
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("summary-only edits survive acceptance without dropping score agreements or silently discarding text", async () => {
+  const { mf, env, idea } = await fixture();
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    await submitReviewScores(
+      env,
+      r,
+      idea,
+      complete().scores,
+      A,
+      "",
+      "Initial response summary",
+    );
+    r = await getReview(env, idea);
+    await agreeReview(env, r, B);
+    await agreeReview(env, r, C);
+    await submitReviewScores(
+      env,
+      r,
+      idea,
+      complete().scores,
+      B,
+      "",
+      "Proposed response summary",
+    );
+    let requests = await reviewChanges(env, idea.id);
+    assert.equal(
+      JSON.parse((await getReview(env, idea)).draft).note,
+      "Initial response summary",
+    );
+    await applyReviewChange(env, r, idea, requests.at(-1).id, A);
+    r = await getReview(env, idea);
+    assert.equal(JSON.parse(r.draft).note, "Proposed response summary");
+    assert.equal((await agreements(env, r)).length, 3);
+    assert.ok(
+      feedbackFor(idea, JSON.parse(r.draft)).includes(
+        "**Summary:** Proposed response summary",
+      ),
+    );
+    await assert.rejects(
+      submitReviewScores(
+        env,
+        r,
+        idea,
+        complete().scores,
+        B,
+        "Text in the wrong box",
+      ),
+      /Put response wording in Summary/,
+    );
+    await assert.rejects(
+      submitReviewScores(
+        env,
+        r,
+        idea,
+        complete().scores,
+        B,
+        "",
+        "x".repeat(1001),
+      ),
+      /Feedback must be at most/,
+    );
+    const ctx = {
+      waitUntil() {
+        throw Error("Immediate modal response expected");
+      },
+    };
+    const modal = await (
+      await handleReviewInteraction(env, ctx, {
+        type: 3,
+        guild_id: "guild",
+        channel_id: "private",
+        application_id: "app",
+        token: "token",
+        member: { roles: ["council"], user: { id: B.id, username: B.name } },
+        data: { custom_id: `review:changescores:1:${r.revision}` },
+      })
+    ).json();
+    assert.ok(modal.data.components.every((c) => c.type === 18));
+    assert.equal(modal.data.components.length, 5);
+    assert.equal(
+      modal.data.components.find((c) => c.component.custom_id === "summary")
+        .component.value,
+      "Proposed response summary",
+    );
   } finally {
     await mf.dispose();
   }

@@ -109,11 +109,17 @@ export function feedbackFor(
   const r = draftResult(d);
   const lines = [`Idea #${idea.id} — ${idea.title}`];
   if (r.flags.length) {
-    lines.push("Further action required");
+    lines.push("## __**Checks Failed**__");
     for (const c of r.flags) lines.push(`${c.action}: ${c.feedback}`);
   } else if (r.band) {
-    lines.push(`${r.band.name} · ${r.total}/20`, r.band.feedback);
+    lines.push(
+      `${r.band.name} · ${r.total}/20`,
+      `**Summary:** ${r.band.feedback}`,
+    );
   } else lines.push("Draft — scores incomplete.");
+  if (d.issues.length && d.issueReason.trim())
+    lines.push(`**Summary:** ${d.issueReason.trim()}`);
+  if (d.note.trim()) lines.push(`**Summary:** ${d.note.trim()}`);
   for (const c of CRITERIA) {
     const score = d.scores[c.id];
     lines.push(
@@ -125,9 +131,7 @@ export function feedbackFor(
   const notes = CRITERIA.filter((c) => d.reasons[c.id]?.trim()).map(
     (c) => `${c.name}: ${d.reasons[c.id].trim()}`,
   );
-  if (d.issues.length && d.issueReason.trim())
-    notes.push(`Checks: ${d.issueReason.trim()}`);
-  if (d.note.trim()) notes.push(d.note.trim());
+
   if (notes.length) lines.push("Council notes:\n" + notes.join("\n"));
   lines.push("A recommendation does not guarantee implementation.");
   return lines.join("\n\n");

@@ -161,8 +161,8 @@ request cannot overwrite a newer revision or changed idea. Requests can be appli
 only by a different Council member and only while the assessment is open.
 
 The score modal uses three required Discord Label/String Select components and
-a message explaining completion/cancellation. Initial scoring has no reason input;
-changing submitted scores adds an optional reason input, validated on submission. Discord modals have no disabled fields or live
+completion/cancellation instructions in the first label description. Initial scoring has no reason input;
+changing submitted scores adds an optional reason input, validated on submission. Both forms also contain an optional Summary field, prefilled from the shared draft; this wording is retained in previews, the head-of-thread assessment and the recorded submission. The form uses Labels only (at most five), without a standalone Text Display. Discord modals have no disabled fields or live
 on-change callbacks, so the reason cannot dynamically gray out or become required
 while the popup is open. Conditional reason validation happens on submission.
 Requiring all three selects makes Discord keep the native popup open when a
@@ -219,3 +219,7 @@ approval invalidation, repeated votes, withdrawals, stale
 revisions/content, frozen publication, full event snapshots, and native role/guild
 checks. SQLite tests execute the production D1 SQL through a transactional adapter;
 real Discord interaction and deployed D1 acceptance are part of staging verification.
+
+Failed checks are headed **Checks Failed**, with bold/underline heading markup. Guidance tells Council what to do next, such as ask the original poster for clarification or explain the existing feature. Work is described as underway only when confirmed; a duplicate does not itself establish implementation status. Check explanations and response wording have explicit Summary labels. Editing only the response summary preserves score agreements and check seconds, while still following the editor/change-request rules and recording a new audit snapshot. A reason entered with unchanged scores is rejected with guidance to use Summary, rather than silently discarded.
+
+Discord window-switching/rendering reports still require testing in the affected client after deployment. The simpler Label-only modal layout is a mitigation to evaluate, not a verified fix for a client reload.

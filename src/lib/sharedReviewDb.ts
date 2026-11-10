@@ -599,6 +599,7 @@ export async function submitReviewScores(
   scores: Record<string, number>,
   actor: Reviewer,
   explanation: string,
+  summary?: string,
 ) {
   const draft: ReviewDraft = JSON.parse(r.draft);
   for (const id of ["usefulness", "feasibility", "interest"])
@@ -607,12 +608,20 @@ export async function submitReviewScores(
   const changed = Object.keys(draft.scores).filter(
     (id) => scores[id] !== draft.scores[id],
   );
-  if (!changed.length) return;
+  const summaryChanged = summary !== undefined && summary.trim() !== draft.note;
+  if (!changed.length && !summaryChanged) {
+    if (explanation.trim())
+      throw Error(
+        "No scores changed. Put response wording in Summary instead.",
+      );
+    return;
+  }
+  if (summary !== undefined) draft.note = summary.trim();
   const prior = await hasSubmittedScores(env, r);
   if (explanation.length > 500)
     throw Error("The reason must be at most 500 characters.");
   const reason = explanation.trim();
-  if (prior && !reason)
+  if (prior && changed.length && !reason)
     throw Error("Explain why you are changing the submitted scores.");
   for (const id of changed) {
     draft.scores[id] = scores[id];
@@ -625,8 +634,11 @@ export async function submitReviewScores(
     idea,
     draft,
     actor,
-    reason || "Initial scores submitted",
-    true,
+    reason ||
+      (changed.length
+        ? "Initial scores submitted"
+        : "Updated response summary"),
+    changed.length > 0,
   );
 }
 export async function pendingReviewChanges(

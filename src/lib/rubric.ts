@@ -68,39 +68,44 @@ export const CHECKS: Check[] = [
   {
     id: "clarity",
     name: "Needs more clarity",
-    action: "Return for clarification",
-    feedback: "Please clarify the problem and what the change would do.",
+    action: "Ask the original poster for clarification",
+    feedback:
+      "Ask them to clarify the problem they want to solve and what the proposed change would do.",
   },
   {
     id: "evidence",
     name: "Needs development or evidence",
-    action: "Return for further work",
+    action: "Ask the original poster for more detail or evidence",
     feedback:
-      "Needs more detail or examples before we can assess benefits and implications.",
+      "Request details, examples or evidence so Council can assess the benefits and implications.",
   },
   {
     id: "split",
     name: "Several separable ideas",
-    action: "Return to split",
-    feedback: "Contains distinct changes; please submit them separately.",
+    action: "Ask the original poster to split the proposal",
+    feedback:
+      "Ask them to submit the distinct changes as separate proposals for independent assessment.",
   },
   {
     id: "exists",
     name: "Already exists",
-    action: "Explain and close",
-    feedback: "This is already supported; please explain any remaining gap.",
+    action: "Tell the original poster the feature already exists",
+    feedback:
+      "Explain how to use the existing feature. Ask whether there is a remaining gap before closing the idea.",
   },
   {
     id: "duplicate",
     name: "Duplicates a proposal",
-    action: "Link and consolidate",
-    feedback: "Overlaps an existing proposal; add your support there.",
+    action: "Link the existing proposal and consolidate the discussion",
+    feedback:
+      "Tell the original poster where the existing discussion is and invite them to add their examples and support. If work is confirmed to be underway, explain its current status.",
   },
   {
     id: "dependency",
     name: "Depends on another change",
-    action: "Defer and link",
-    feedback: "Depends on another change being completed first.",
+    action: "Explain the prerequisite and defer the idea",
+    feedback:
+      "Tell the original poster which change must happen first and link it. State whether that work is planned or underway only when confirmed.",
   },
 ];
 
@@ -164,10 +169,7 @@ export interface Assignment {
 export type Assignments = Record<string, Assignment>;
 
 export interface ReviewResult {
-  status:
-    | "Assessment in progress"
-    | "Further action required"
-    | "Assessment agreed";
+  status: "Assessment in progress" | "Checks Failed" | "Assessment agreed";
   flags: Check[];
   pendingIds: string[];
   total: number | null;
@@ -187,7 +189,7 @@ export function computeResult(assignments: Assignments): ReviewResult {
 
   if (flags.length)
     return {
-      status: "Further action required",
+      status: "Checks Failed",
       flags,
       pendingIds,
       total: null,
@@ -226,7 +228,10 @@ export function feedbackText(
   councilNote: string,
 ): string {
   const r = computeResult(assignments);
-  const lines: string[] = [ideaRef, r.status];
+  const lines: string[] = [
+    ideaRef,
+    r.flags.length ? "## __**Checks Failed**__" : r.status,
+  ];
   if (r.flags.length) {
     for (const c of r.flags) {
       lines.push(`${c.action}: ${c.feedback}`);

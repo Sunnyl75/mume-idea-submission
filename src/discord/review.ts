@@ -37,7 +37,7 @@ import {
 } from "../lib/sharedReviewDb";
 import type { SharedReview, ReviewEvent } from "../lib/sharedReviewDb";
 import { discordFetch, discordJson } from "./rest";
-import { withSummaryEmbed } from "./embed";
+import { chunkValue, withSummaryEmbed } from "./embed";
 interface ModalField {
   type?: number;
   custom_id?: string;
@@ -148,7 +148,7 @@ export async function assessmentSummaryEmbed(
     !stale && checksAgreed(d, r.checks_proposer_id, r.checks_seconder_id);
   const fields = [
     {
-      name: "Response guidance",
+      name: "Summary: response guidance",
       value: result.flags.length
         ? CHECKS.filter((c) => d.issues.includes(c.id))
             .map((c) => `${c.action}: ${c.feedback}`)
@@ -157,6 +157,7 @@ export async function assessmentSummaryEmbed(
           ? result.band.feedback
           : "Complete the scores to produce response guidance.",
     },
+    ...(d.note.trim() ? [{ name: "Summary", value: escape(d.note) }] : []),
     {
       name: "Current scores and rubric",
       value:
@@ -207,17 +208,23 @@ export async function assessmentSummaryEmbed(
   return {
     title: "Current assessment",
     description:
-      r.status === "published"
+      (result.flags.length ? "## __**Checks Failed**__\n" : "") +
+      (r.status === "published"
         ? "Assessment submitted and recorded privately."
         : r.status === "publishing"
           ? "Submitting assessment…"
-          : "Assessment in progress",
+          : "Assessment in progress"),
     color:
       !stale &&
       readyToClose(d, votes.length, r.checks_proposer_id, r.checks_seconder_id)
         ? 0x2d7d46
         : 0x5865f2,
-    fields,
+    fields: fields.flatMap((field) =>
+      chunkValue(field.value).map((value, j) => ({
+        name: field.name + (j ? " (continued)" : ""),
+        value,
+      })),
+    ),
     footer: { text: SUMMARY_MARKER },
   };
 }
@@ -351,6 +358,7 @@ export async function reviewPayload(
         }\n${checksStatus}\nScore agreements: ${votes.length}/${AGREEMENTS_REQUIRED}.${pending.length ? "\n" + pending.length + " change request(s) awaiting review." : " No changes awaiting review."}`,
       ),
     ),
+    ...(draft.note.trim() ? [text(`**Summary:** ${escape(draft.note)}`)] : []),
     box(
       text(
         `### Scores\n${scores}\n${resultLine}\n${result.band ? result.band.feedback + "\n" : ""}${CRITERIA.filter(
@@ -390,13 +398,14 @@ export async function reviewPayload(
     ),
     box(
       text(
-        `### Checks\n${checksStatus}${
+        `### ${draft.issues.length ? "__**Checks Failed**__" : "Checks"}\n${checksStatus}${
           draft.issues.length
             ? "\n" +
               CHECKS.filter((c) => draft.issues.includes(c.id))
                 .map((c) => c.name)
                 .join(" · ") +
               "\n" +
+              "**Summary:** " +
               escape(draft.issueReason).slice(0, 1000)
             : ""
         }`,
@@ -735,7 +744,7 @@ async function changePayload(
     embeds: [
       {
         title: `Change request #${q.id} · Idea #${idea.id}`,
-        description: `By **${escape(q.proposer_name)}** against revision ${q.base_revision}. ${current ? "Pending" : q.status === "pending" ? "Outdated — submit a fresh request" : q.status}\n${escape(q.reason).slice(0, 1000)}\n\nThis is the exact proposed replacement. The editor can accept it, or one other Council member can back it. Applying transfers editing to the proposer; it does not second checks or agree to scores.`,
+        description: `By **${escape(q.proposer_name)}** against revision ${q.base_revision}. ${current ? "Pending" : q.status === "pending" ? "Outdated — submit a fresh request" : q.status}\n${escape(q.reason).slice(0, 1000)}\n\nThis is the exact proposed replacement. The editor can accept it, or one other Council member can back it. Applying transfers editing to the proposer. It does not second checks; changed complete scores count as the proposer’s first score agreement.`,
         fields,
         color: 0x5865f2,
       },
@@ -826,7 +835,7 @@ async function publish(
       {
         method: "POST",
         body: {
-          content: `**${marker}**`,
+          content: `**${marker}**${draftResult(JSON.parse(r.draft)).flags.length ? "\n## __**Checks Failed**__" : ""}`,
           embeds: chunks.map((description) => ({
             description,
             color: 0x5865f2,
@@ -917,15 +926,16 @@ export async function handleReviewInteraction(
               : "Submit changed scores"
             : "Submit initial scores",
           [
-            text(
-              "Please score all categories, or cancel. " +
-                (prior
-                  ? "Current scores are preselected. Changed scores need an explanation."
-                  : "Initial scores need no explanation and count as your agreement."),
-            ),
             ...CRITERIA.map((c) => ({
               type: 18,
               label: c.name + (c.weight === 2 ? " (counts twice)" : ""),
+              description:
+                c.id === "usefulness"
+                  ? "Please score all categories, or cancel. " +
+                    (prior
+                      ? "Current scores are preselected."
+                      : "Initial scores need no explanation.")
+                  : undefined,
               component: {
                 type: 3,
                 custom_id: c.id,
@@ -957,6 +967,13 @@ export async function handleReviewInteraction(
                   },
                 ]
               : []),
+            textInput(
+              "summary",
+              "Summary (optional response wording)",
+              d.note,
+              1000,
+              false,
+            ),
           ],
         );
       }
@@ -977,7 +994,7 @@ export async function handleReviewInteraction(
         [
           textInput(
             "reason",
-            "Explain selected issues (or their removal)",
+            "Summary: action needed (or reason for removal)",
             d.issueReason,
             1000,
             true,
@@ -1034,6 +1051,7 @@ export async function handleReviewInteraction(
             scores,
             actor,
             values.reason ?? "",
+            values.summary,
           );
         } else if (op === "setissues" && i.type === 5) {
           const mask = Number(parts[4]);
