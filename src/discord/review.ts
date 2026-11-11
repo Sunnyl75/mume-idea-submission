@@ -1044,6 +1044,9 @@ export async function handleReviewInteraction(
     (async () => {
       const webhook = `https://discord.com/api/v10/webhooks/${i.application_id}/${i.token}/messages/@original`;
       try {
+        let checkSubmission:
+          | { proposed: boolean; draft: ReviewDraft }
+          | undefined;
         const idea = await getIdea(env, id);
         if (!idea) throw Error("Unknown idea.");
         if (!idea.review_thread_id || i.channel_id !== idea.review_thread_id)
@@ -1109,6 +1112,13 @@ export async function handleReviewInteraction(
                     .join(", ")
                 : "Cleared selected checks"),
           );
+          checkSubmission = { proposed: r.author_id !== actor.id, draft: d };
+          console.info("review checks saved", {
+            ideaId: id,
+            proposed: checkSubmission.proposed,
+            issues: d.issues,
+            summaryLength: d.issueReason.length,
+          });
         } else if (op === "start" && i.type === 3)
           await startReview(env, r, actor);
         else if (
@@ -1200,8 +1210,41 @@ export async function handleReviewInteraction(
           });
           return;
         }
-        const payload =
-          op === "preview"
+        const payload = checkSubmission
+          ? summaryPanel(
+              checkSubmission.proposed
+                ? "Change request saved"
+                : "Checks saved",
+              (checkSubmission.proposed
+                ? "Your selected checks and summary were saved as a change request. The current assessment stays unchanged until the editor accepts it or one other member backs it."
+                : checkSubmission.draft.issues.length
+                  ? "Your selected checks and summary are now in the assessment. One other Council member must Second them."
+                  : "The selected checks have been cleared; checks now pass.") +
+                "\n\n**Selected checks:**\n" +
+                (CHECKS.filter((c) =>
+                  checkSubmission!.draft.issues.includes(c.id),
+                )
+                  .map((c) => "• " + c.name)
+                  .join("\n") || "None — checks pass") +
+                (checkSubmission.draft.issueReason.trim()
+                  ? "\n\n**Summary:** " +
+                    escape(checkSubmission.draft.issueReason)
+                  : "\n\nNo summary added."),
+              [
+                row(
+                  ...(checkSubmission.proposed
+                    ? [
+                        button(
+                          "View change requests",
+                          `review:changes:${id}:${r.revision}`,
+                        ),
+                      ]
+                    : []),
+                  button("Back to assessment", `review:refresh:${id}:0`),
+                ),
+              ],
+            )
+          : op === "preview"
             ? summaryPanel(
                 "Assessment summary — not recorded",
                 feedbackFor(idea, JSON.parse(r.draft)),

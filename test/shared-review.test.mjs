@@ -2278,3 +2278,91 @@ test("checks modal shows selected issues and accepts blank summaries through req
     await mf.dispose();
   }
 });
+
+test("check summary text is retained for editors and proposers with explicit save confirmations", async () => {
+  const { mf, env, idea } = await fixture();
+  const oldFetch = globalThis.fetch;
+  let shown;
+  globalThis.fetch = async (url, options) => {
+    if (url.includes("/webhooks/")) shown = JSON.parse(options.body);
+    return Response.json({});
+  };
+  const submit = async (r, actor, mask, reason) => {
+    let pending;
+    const ack = await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      {
+        type: 5,
+        guild_id: "guild",
+        channel_id: "private",
+        application_id: "app",
+        token: "token",
+        message: { id: "personal-panel", flags: 64 | 32768 },
+        member: {
+          roles: ["council"],
+          user: { id: actor.id, username: actor.name },
+        },
+        data: {
+          custom_id: `review:setissues:1:${r.revision}:${mask}`,
+          components: [
+            { type: 10, id: 1 },
+            {
+              type: 18,
+              id: 2,
+              component: { type: 4, id: 3, custom_id: "reason", value: reason },
+            },
+          ],
+        },
+      },
+    );
+    assert.equal((await ack.json()).type, 6);
+    await pending;
+    return panelText(shown);
+  };
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    let text = await submit(
+      r,
+      B,
+      1,
+      "Please explain which command should change.",
+    );
+    assert.match(text, /Change request saved/);
+    assert.ok(text.includes("Please explain which command should change."));
+    assert.ok(text.includes("Needs more clarity"));
+    assert.ok(text.includes("current assessment stays unchanged"));
+    r = await getReview(env, idea);
+    assert.deepEqual(JSON.parse(r.draft).issues, []);
+    const [q] = await reviewChanges(env, idea.id);
+    assert.equal(
+      JSON.parse(q.draft).issueReason,
+      "Please explain which command should change.",
+    );
+    assert.deepEqual(JSON.parse(q.draft).issues, ["clarity"]);
+    text = await submit(r, A, 2, "Add examples of where the problem occurs.");
+    assert.match(text, /Checks saved/);
+    assert.ok(text.includes("Add examples of where the problem occurs."));
+    r = await getReview(env, idea);
+    assert.equal(
+      JSON.parse(r.draft).issueReason,
+      "Add examples of where the problem occurs.",
+    );
+    assert.deepEqual(JSON.parse(r.draft).issues, ["evidence"]);
+    assert.ok(
+      !shown.components
+        .flatMap((c) => c.components || [])
+        .some((c) => c.label === "Accept / back and apply"),
+      "No acceptance implied by saving a proposal",
+    );
+  } finally {
+    globalThis.fetch = oldFetch;
+    await mf.dispose();
+  }
+});
