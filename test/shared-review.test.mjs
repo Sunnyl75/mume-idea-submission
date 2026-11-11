@@ -1621,6 +1621,11 @@ test("scoring modal distinguishes initial and changed scoring, requires all drop
       await handleReviewInteraction(env, ctx, i("changescores"))
     ).json();
     assert.equal(modal.data.title, "Submit changed scores");
+    for (const label of modal.data.components) {
+      assert.ok(label.label.length <= 45);
+      assert.ok((label.description || "").length <= 100);
+    }
+
     for (const c of modal.data.components.slice(0, 3))
       assert.equal(
         Number(c.component.options.find((o) => o.default).value),
@@ -2116,6 +2121,11 @@ test("opening score and check dialogs uses one read and never writes/imports a r
       assert.equal(body.type, 9);
       assert.equal(reads, 1);
       assert.ok(body.data.components.length <= 5);
+      for (const label of body.data.components) {
+        assert.ok(label.label.length <= 45, `Discord Label exceeds 45 characters: ${label.label}`);
+        assert.ok((label.description || "").length <= 100);
+      }
+
     }
   } finally {
     env.DB.prepare = originalPrepare;

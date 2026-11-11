@@ -1005,7 +1005,7 @@ export async function handleReviewInteraction(
         [
           textInput(
             "reason",
-            "Summary: action needed (or reason for removal)",
+            "Summary: action needed or reason for removal",
             d.issueReason,
             1000,
             true,
