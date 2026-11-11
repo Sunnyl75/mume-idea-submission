@@ -17,6 +17,7 @@ import {
 import type { ReviewDraft, Reviewer } from "../lib/sharedReview";
 import {
   getReview,
+  reviewModalState,
   agreements,
   agreeReview,
   withdrawAgreement,
@@ -900,20 +901,30 @@ export async function handleReviewInteraction(
     i.type === 3 &&
     (op === "scores" || op === "changescores" || op === "issues");
   if (openModal) {
+    const started = Date.now();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      const idea = await getIdea(env, id);
-      if (!idea || idea.status === "resolved")
+      const r = await Promise.race([
+        reviewModalState(env, id, op !== "issues"),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(
+            () => reject(Error("MODAL_READ_TIMEOUT")),
+            1600,
+          );
+        }),
+      ]);
+      if (!r) return fail("Reload the assessment before opening this form.");
+      if (r.idea_status === "resolved")
         return fail("Reopen the idea before changing its assessment.");
-      if (!idea.review_thread_id || i.channel_id !== idea.review_thread_id)
+      if (!r.review_thread_id || i.channel_id !== r.review_thread_id)
         return fail("Use the private review thread.");
-      const r = await getReview(env, idea);
       if (r.revision !== rev || r.status !== "open")
         return fail("This assessment changed or closed. Refresh it.");
       const d: ReviewDraft = JSON.parse(r.draft);
       if (!r.author_id) return fail("Click Start assessment first.");
       const proposing = r.author_id !== actor.id;
       if (op === "scores" || op === "changescores") {
-        const prior = await hasSubmittedScores(env, r);
+        const prior = draftResult(d).total !== null || !!r.previously_scored;
         if (prior && op === "scores")
           return fail(
             "Scores have already been submitted. Use Submit changed scores.",
@@ -1002,8 +1013,25 @@ export async function handleReviewInteraction(
         ],
       );
     } catch (e) {
-      console.error("review modal", e);
-      return fail("Could not open assessment. Try again.");
+      const timedOut = (e as Error).message === "MODAL_READ_TIMEOUT";
+      console.error("review modal", {
+        ideaId: id,
+        op,
+        timedOut,
+        error: (e as Error).message,
+      });
+      return fail(
+        timedOut
+          ? "The assessment database is taking too long. No changes were saved. Please try again."
+          : "Could not open assessment. Try again.",
+      );
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+      console.info("review modal response", {
+        ideaId: id,
+        op,
+        elapsedMs: Date.now() - started,
+      });
     }
   }
   ctx.waitUntil(

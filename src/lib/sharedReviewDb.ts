@@ -68,6 +68,32 @@ export async function getReview(
     .bind(idea.id)
     .first<SharedReview>())!;
 }
+// Dialogs must be returned within Discord's initial-response deadline. Read the
+// existing review, private-thread guard and scoring history in one round trip.
+// Unlike getReview this never imports/creates a draft on the modal-opening path.
+export async function reviewModalState(
+  env: Env,
+  ideaId: number,
+  scoring: boolean,
+) {
+  return env.DB.prepare(
+    `SELECT r.*, i.status AS idea_status, i.review_thread_id,
+    EXISTS(SELECT 1 FROM council_review_events e WHERE ? AND e.idea_id=r.idea_id
+      AND e.action NOT IN ('request_change','withdraw_change')
+      AND json_type(e.snapshot,'$.scores.usefulness')='integer' AND json_extract(e.snapshot,'$.scores.usefulness') BETWEEN 1 AND 5
+      AND json_type(e.snapshot,'$.scores.feasibility')='integer' AND json_extract(e.snapshot,'$.scores.feasibility') BETWEEN 1 AND 5
+      AND json_type(e.snapshot,'$.scores.interest')='integer' AND json_extract(e.snapshot,'$.scores.interest') BETWEEN 1 AND 5 LIMIT 1) AS previously_scored
+    FROM council_reviews r JOIN ideas i ON i.id=r.idea_id WHERE r.idea_id=?`,
+  )
+    .bind(Number(scoring), ideaId)
+    .first<
+      SharedReview & {
+        idea_status: string;
+        review_thread_id: string | null;
+        previously_scored: number;
+      }
+    >();
+}
 export async function agreements(
   env: Env,
   r: SharedReview,

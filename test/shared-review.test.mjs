@@ -2076,3 +2076,103 @@ test("summary-only edits survive acceptance without dropping score agreements or
     await mf.dispose();
   }
 });
+
+test("opening score and check dialogs uses one read and never writes/imports a review", async () => {
+  const { mf, env, idea } = await fixture();
+  const originalPrepare = env.DB.prepare;
+  try {
+    let r = await getReview(env, idea);
+    await startReview(env, r, A);
+    r = await getReview(env, idea);
+    let reads = 0;
+    env.DB.prepare = (sql) => {
+      reads++;
+      assert.match(sql.trim(), /^SELECT/);
+      return originalPrepare.call(env.DB, sql);
+    };
+    for (const op of ["scores", "issues"]) {
+      reads = 0;
+      const res = await handleReviewInteraction(
+        env,
+        {
+          waitUntil() {
+            throw Error("No background work opening a modal");
+          },
+        },
+        {
+          type: 3,
+          guild_id: "guild",
+          channel_id: "private",
+          application_id: "app",
+          token: "token",
+          member: { roles: ["council"], user: { id: A.id, username: A.name } },
+          data: {
+            custom_id: `review:${op}:1:${r.revision}`,
+            values: ["clarity"],
+          },
+        },
+      );
+      const body = await res.json();
+      assert.equal(body.type, 9);
+      assert.equal(reads, 1);
+      assert.ok(body.data.components.length <= 5);
+    }
+  } finally {
+    env.DB.prepare = originalPrepare;
+    await mf.dispose();
+  }
+});
+
+test("slow database reads return an early private retry response for both dialogs", async () => {
+  const started = Date.now();
+  const results = await Promise.all(
+    ["scores", "issues"].map(async (op) => {
+      let reads = 0;
+      const env = {
+        DISCORD_GUILD_ID: "guild",
+        COUNCIL_ROLE_ID: "council",
+        DB: {
+          prepare() {
+            reads++;
+            return {
+              bind() {
+                return this;
+              },
+              first() {
+                return new Promise(() => {});
+              },
+            };
+          },
+        },
+      };
+      const res = await handleReviewInteraction(
+        env,
+        {
+          waitUntil() {
+            throw Error("Must reply directly");
+          },
+        },
+        {
+          type: 3,
+          guild_id: "guild",
+          channel_id: "private",
+          application_id: "app",
+          token: "token",
+          member: { roles: ["council"], user: { id: A.id, username: A.name } },
+          data: { custom_id: `review:${op}:1:1`, values: ["clarity"] },
+        },
+      );
+      assert.equal(reads, 1);
+      return res.json();
+    }),
+  );
+  assert.ok(
+    Date.now() - started < 2500,
+    "Reply before Discord's three-second deadline even if D1 never resolves",
+  );
+  for (const body of results) {
+    assert.equal(body.type, 4);
+    assert.equal(body.data.flags, 64);
+    assert.match(body.data.content, /No changes were saved\. Please try again/);
+  }
+});
