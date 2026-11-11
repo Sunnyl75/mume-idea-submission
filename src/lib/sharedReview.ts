@@ -77,12 +77,8 @@ export function validateDraft(d: ReviewDraft): void {
     d.issues.some((id) => !CHECKS.some((c) => c.id === id))
   )
     throw Error("Unknown or duplicate issue.");
-  if (
-    typeof d.issueReason !== "string" ||
-    d.issueReason.length > 1000 ||
-    (d.issues.length && !d.issueReason.trim())
-  )
-    throw Error("Explain the selected issues (up to 1000 characters).");
+  if (typeof d.issueReason !== "string" || d.issueReason.length > 1000)
+    throw Error("The issue summary must be at most 1000 characters.");
   if (typeof d.note !== "string" || d.note.length > 1000)
     throw Error("Feedback must be at most 1000 characters.");
 }
@@ -99,7 +95,7 @@ export function draftResult(d: ReviewDraft) {
       !flags.length && total !== null
         ? BANDS.find((b) => total <= b.max)!
         : null,
-    ready: flags.length ? !!d.issueReason.trim() : complete,
+    ready: flags.length ? true : complete,
   };
 }
 export function feedbackFor(

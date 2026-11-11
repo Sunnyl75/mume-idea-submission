@@ -2121,11 +2121,13 @@ test("opening score and check dialogs uses one read and never writes/imports a r
       assert.equal(body.type, 9);
       assert.equal(reads, 1);
       assert.ok(body.data.components.length <= 5);
-      for (const label of body.data.components) {
-        assert.ok(label.label.length <= 45, `Discord Label exceeds 45 characters: ${label.label}`);
+      for (const label of body.data.components.filter((c) => c.type === 18)) {
+        assert.ok(
+          label.label.length <= 45,
+          `Discord Label exceeds 45 characters: ${label.label}`,
+        );
         assert.ok((label.description || "").length <= 100);
       }
-
     }
   } finally {
     env.DB.prepare = originalPrepare;
@@ -2184,5 +2186,95 @@ test("slow database reads return an early private retry response for both dialog
     assert.equal(body.type, 4);
     assert.equal(body.data.flags, 64);
     assert.match(body.data.content, /No changes were saved\. Please try again/);
+  }
+});
+
+test("checks modal shows selected issues and accepts blank summaries through requests, seconds and submission", async () => {
+  const { mf, env, idea } = await fixture();
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({});
+  const interaction = (op, r, actor, type = 3, extra = {}) => ({
+    type,
+    guild_id: "guild",
+    channel_id: "private",
+    application_id: "app",
+    token: "token",
+    message: { id: "personal-panel", flags: 64 | 32768 },
+    member: {
+      roles: ["council"],
+      user: { id: actor.id, username: actor.name },
+    },
+    data: { custom_id: `review:${op}:1:${r.revision}`, ...extra },
+  });
+  const ctx = {
+    waitUntil() {
+      throw Error("Modal must respond directly");
+    },
+  };
+  const save = async (r, actor, mask) => {
+    let pending;
+    const response = await handleReviewInteraction(
+      env,
+      {
+        waitUntil(p) {
+          pending = p;
+        },
+      },
+      interaction(`setissues`, r, actor, 5, {
+        custom_id: `review:setissues:1:${r.revision}:${mask}`,
+        components: [],
+      }),
+    );
+    assert.equal((await response.json()).type, 6);
+    await pending;
+    return getReview(env, idea);
+  };
+  try {
+    let r = await getReview(env, idea);
+    await directEditReview(env, r, idea, complete(), A, "Initial scores");
+    r = await getReview(env, idea);
+    const modal = await (
+      await handleReviewInteraction(
+        env,
+        ctx,
+        interaction("issues", r, A, 3, { values: ["clarity", "exists"] }),
+      )
+    ).json();
+    assert.equal(modal.type, 9);
+    const heading = modal.data.components.find((c) => c.type === 10).content;
+    for (const id of ["clarity", "exists"])
+      assert.ok(heading.includes(CHECKS.find((c) => c.id === id).name));
+    const field = modal.data.components.find((c) => c.type === 18);
+    assert.equal(
+      field.description,
+      "Add any summary of the issue you would like to include.",
+    );
+    assert.equal(field.component.required, false);
+    assert.ok(field.label.length <= 45);
+    r = await save(r, A, 9);
+    assert.deepEqual(JSON.parse(r.draft).issues, ["clarity", "exists"]);
+    assert.equal(JSON.parse(r.draft).issueReason, "");
+    validateDraft(JSON.parse(r.draft));
+    assert.ok(!feedbackFor(idea, JSON.parse(r.draft)).includes("**Summary:**"));
+    const panel = await reviewPayload(env, idea, r, A.id);
+    assert.ok(!panelText(panel).includes("**Summary:**"));
+    await save(r, B, 16);
+    const requests = await reviewChanges(env, idea.id);
+    const request = requests.find((q) => q.status === "pending");
+    assert.ok(
+      request,
+      "A reviewer can propose checks without a mandatory summary",
+    );
+    assert.equal(JSON.parse(request.draft).issueReason, "");
+    await applyReviewChange(env, r, idea, request.id, A);
+    r = await getReview(env, idea);
+    assert.deepEqual(JSON.parse(r.draft).issues, ["duplicate"]);
+    await secondChecks(env, r, A);
+    r = await getReview(env, idea);
+    await reservePublish(env, r);
+    assert.equal((await getReview(env, idea)).status, "publishing");
+  } finally {
+    globalThis.fetch = oldFetch;
+    await mf.dispose();
   }
 });

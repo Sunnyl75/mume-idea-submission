@@ -405,9 +405,9 @@ export async function reviewPayload(
               CHECKS.filter((c) => draft.issues.includes(c.id))
                 .map((c) => c.name)
                 .join(" · ") +
-              "\n" +
-              "**Summary:** " +
-              escape(draft.issueReason).slice(0, 1000)
+              (draft.issueReason.trim()
+                ? "\n**Summary:** " + escape(draft.issueReason).slice(0, 1000)
+                : "")
             : ""
         }`,
       ),
@@ -999,19 +999,25 @@ export async function handleReviewInteraction(
         (n, c, j) => n + (chosen.includes(c.id) ? 2 ** j : 0),
         0,
       );
-      return modal(
-        `review:setissues:${id}:${rev}:${mask}`,
-        "Issues requiring action",
-        [
-          textInput(
+      return modal(`review:setissues:${id}:${rev}:${mask}`, "Selected issues", [
+        text(
+          "### " +
+            (CHECKS.filter((c) => chosen.includes(c.id))
+              .map((c) => c.name)
+              .join(" · ") || "No issues selected — checks pass"),
+        ),
+        {
+          ...textInput(
             "reason",
-            "Summary: action needed or reason for removal",
+            "Summary (optional)",
             d.issueReason,
             1000,
-            true,
+            false,
           ),
-        ],
-      );
+          description:
+            "Add any summary of the issue you would like to include.",
+        },
+      ]);
     } catch (e) {
       const timedOut = (e as Error).message === "MODAL_READ_TIMEOUT";
       console.error("review modal", {
@@ -1095,7 +1101,13 @@ export async function handleReviewInteraction(
             idea,
             d,
             actor,
-            values.reason ?? "",
+            values.reason?.trim() ||
+              (d.issues.length
+                ? "Selected checks: " +
+                  CHECKS.filter((c) => d.issues.includes(c.id))
+                    .map((c) => c.name)
+                    .join(", ")
+                : "Cleared selected checks"),
           );
         } else if (op === "start" && i.type === 3)
           await startReview(env, r, actor);
