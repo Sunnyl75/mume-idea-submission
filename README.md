@@ -11,7 +11,7 @@ See [`../idea-board-build-spec.md`](../idea-board-build-spec.md) for the full sp
 ## Council assessment
 
 See [ASSESSMENT.md](ASSESSMENT.md) for the native Discord review flow: shared,
-editable rubric scores, optional issue flags, and one second on the selected checks and three distinct Council members
+1–5 score dropdowns, a named editor with backed change requests, optional issue flags, and one second on the selected checks and three distinct Council members
 agreeing to the final scores before a score recommendation is recorded privately. No separate review
 website or new Discord command is needed. Tests require Node 22.13+ (24 recommended).
 

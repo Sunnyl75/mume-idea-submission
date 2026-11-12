@@ -3,7 +3,13 @@
 // never the live config.
 
 import type { Answers, Field, FormConfig, IdeaRow, Status } from "../types";
-import { STATUS_COLOR, STATUS_DESCRIPTION, STATUS_DOT, STATUS_LABEL, STATUSES } from "../constants";
+import {
+  STATUS_COLOR,
+  STATUS_DESCRIPTION,
+  STATUS_DOT,
+  STATUS_LABEL,
+  STATUSES,
+} from "../constants";
 import { fieldById } from "../lib/config";
 
 const TITLE_MAX = 100; // thread name / embed title cap
@@ -39,7 +45,10 @@ export function chunkValue(s: string, max = FIELD_VALUE_MAX): string[] {
 }
 
 // Resolve a stored answer to display text using the stamped config's field.
-export function answerText(field: Field, value: string | string[] | undefined): string {
+export function answerText(
+  field: Field,
+  value: string | string[] | undefined,
+): string {
   if (value === undefined) return "—";
   if (field.type === "radio") {
     const opt = (field.options ?? []).find((o) => o.value === value);
@@ -47,7 +56,9 @@ export function answerText(field: Field, value: string | string[] | undefined): 
   }
   if (field.type === "checkbox") {
     const arr = Array.isArray(value) ? value : [value];
-    const labels = arr.map((v) => (field.options ?? []).find((o) => o.value === v)?.label ?? v);
+    const labels = arr.map(
+      (v) => (field.options ?? []).find((o) => o.value === v)?.label ?? v,
+    );
     return labels.length ? labels.join(", ") : "—";
   }
   const str = Array.isArray(value) ? value.join(", ") : String(value);
@@ -58,7 +69,10 @@ export function ideaThreadName(id: number, title: string): string {
   return truncate(`Idea ${id} · ${title}`, TITLE_MAX);
 }
 
-export function buildEmbed(idea: IdeaRow, config: FormConfig): Record<string, unknown> {
+export function buildEmbed(
+  idea: IdeaRow,
+  config: FormConfig,
+): Record<string, unknown> {
   const answers = JSON.parse(idea.answers) as Answers;
   const status = idea.status;
 
@@ -68,7 +82,9 @@ export function buildEmbed(idea: IdeaRow, config: FormConfig): Record<string, un
   // dwarf the body), the proposal, then a divider before the summary fields.
   const description = `### Description\n${truncate(bodyRaw || "—", DESC_MAX)}\n\n${DIVIDER}`;
 
-  const author = { name: `${STATUS_DOT[status]}  ${STATUS_LABEL[status].toUpperCase()}` };
+  const author = {
+    name: `${STATUS_DOT[status]}  ${STATUS_LABEL[status].toUpperCase()}`,
+  };
   const title = ideaThreadName(idea.id, idea.title);
   const footer = { text: `Idea ${idea.id} · react to vote · reply to discuss` };
 
@@ -92,8 +108,12 @@ export function buildEmbed(idea: IdeaRow, config: FormConfig): Record<string, un
   // parts and the summary grid. Long-form fields are chunked into this budget so a
   // long idea shows in full (across several fields) instead of being cut at 1024,
   // and can never overflow the embed (which would make Discord reject the post).
-  const fixedLen = title.length + description.length + footer.text.length + author.name.length;
-  let budget = EMBED_TOTAL_MAX - fixedLen - fields.reduce((n, f) => n + f.name.length + f.value.length, 0);
+  const fixedLen =
+    title.length + description.length + footer.text.length + author.name.length;
+  let budget =
+    EMBED_TOTAL_MAX -
+    fixedLen -
+    fields.reduce((n, f) => n + f.name.length + f.value.length, 0);
 
   // Long-form fields (outcome, extra) full-width, so reviewers see the whole idea.
   outer: for (const fid of config.embed.detailFields ?? []) {
@@ -110,7 +130,12 @@ export function buildEmbed(idea: IdeaRow, config: FormConfig): Record<string, un
       if (name.length + piece.length > budget) {
         // Not enough room for the rest — fit what we can with a clear marker, then stop.
         const room = budget - name.length - 12; // headroom for the marker
-        if (room > 40) fields.push({ name, value: truncate(piece, room) + "\n*…truncated*", inline: false });
+        if (room > 40)
+          fields.push({
+            name,
+            value: truncate(piece, room) + "\n*…truncated*",
+            inline: false,
+          });
         break outer;
       }
       fields.push({ name, value: piece, inline: false });
@@ -118,7 +143,14 @@ export function buildEmbed(idea: IdeaRow, config: FormConfig): Record<string, un
     }
   }
 
-  return { author, title, description, color: STATUS_COLOR[status], fields, footer };
+  return {
+    author,
+    title,
+    description,
+    color: STATUS_COLOR[status],
+    fields,
+    footer,
+  };
 }
 
 // The action rows under an idea post: the status select, plus an Edit button
@@ -128,14 +160,24 @@ export function buildIdeaComponents(ideaId: number): Record<string, unknown>[] {
     buildStatusSelect(ideaId),
     {
       type: 1,
-      components: [{ type: 2, style: 2, label: "Edit idea", custom_id: `idea:edit:${ideaId}` }],
+      components: [
+        {
+          type: 2,
+          style: 2,
+          label: "Edit idea",
+          custom_id: `idea:edit:${ideaId}`,
+        },
+      ],
     },
   ];
 }
 
 // String select for changing status. The idea id lives in the custom_id so the
 // handler stays stateless long after the interaction token expires.
-export function buildStatusSelect(ideaId: number, disabled = false): Record<string, unknown> {
+export function buildStatusSelect(
+  ideaId: number,
+  disabled = false,
+): Record<string, unknown> {
   return {
     type: 1,
     components: [
@@ -153,4 +195,57 @@ export function buildStatusSelect(ideaId: number, disabled = false): Record<stri
       },
     ],
   };
+}
+
+// Discord's 6000-character budget is shared by every embed in one message.
+// Preserve the full stored idea; shorten only its displayed card when a Council
+// summary needs room underneath it. Public posts retain their original rendering.
+export function withSummaryEmbed(
+  ideaEmbeds: Record<string, unknown>[],
+  summary: Record<string, unknown>,
+): Record<string, unknown>[] {
+  type Card = {
+    title?: string;
+    description?: string;
+    footer?: { text?: string };
+    author?: { name?: string };
+    fields?: Array<{ name: string; value: string }>;
+  };
+  const originals = structuredClone(ideaEmbeds) as Card[];
+  const length = (e: Card) =>
+    (e.title?.length || 0) +
+    (e.description?.length || 0) +
+    (e.footer?.text?.length || 0) +
+    (e.author?.name?.length || 0) +
+    (e.fields || []).reduce((n, f) => n + f.name.length + f.value.length, 0);
+  let overflow =
+    originals.reduce((n, e) => n + length(e), 0) +
+    length(summary as Card) -
+    EMBED_TOTAL_MAX;
+  for (const e of originals) {
+    if (overflow <= 0) break;
+    if (e.description) {
+      const remove = Math.min(
+        overflow,
+        Math.max(0, e.description.length - 200),
+      );
+      e.description = truncate(e.description, e.description.length - remove);
+      overflow -= remove;
+    }
+    for (const f of [...(e.fields || [])].reverse()) {
+      if (overflow <= 0) break;
+      const remove = Math.min(overflow, Math.max(0, f.value.length - 60));
+      f.value = truncate(f.value, f.value.length - remove);
+      overflow -= remove;
+    }
+    while (overflow > 0 && e.fields?.length) {
+      const f = e.fields.pop()!;
+      overflow -= f.name.length + f.value.length;
+    }
+  }
+  if (overflow > 0)
+    throw Error(
+      "The idea and assessment summary exceed Discord's message budget.",
+    );
+  return [...(originals as Record<string, unknown>[]), summary];
 }

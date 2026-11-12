@@ -51,7 +51,11 @@ export function readyToClose(
 ): boolean {
   const result = draftResult(d);
   if (result.flags.length)
-    return result.ready && checksAgreed(d, proposer, seconder);
+    return (
+      result.total !== null &&
+      result.ready &&
+      checksAgreed(d, proposer, seconder)
+    );
   return result.total !== null && scoreVotes >= AGREEMENTS_REQUIRED;
 }
 export function validateDraft(d: ReviewDraft): void {
@@ -62,10 +66,10 @@ export function validateDraft(d: ReviewDraft): void {
     if (v !== null && (!Number.isInteger(v) || v < 1 || v > 5))
       throw Error("Scores must be 1–5, or blank.");
     if (
-      v !== null &&
-      (!d.reasons[c.id]?.trim() || d.reasons[c.id].length > 500)
+      d.reasons[c.id] !== undefined &&
+      (typeof d.reasons[c.id] !== "string" || d.reasons[c.id].length > 500)
     )
-      throw Error("Explain each score (up to 500 characters).");
+      throw Error("Score explanations must be at most 500 characters.");
   }
   if (
     d.issues.length > CHECKS.length ||
@@ -73,12 +77,8 @@ export function validateDraft(d: ReviewDraft): void {
     d.issues.some((id) => !CHECKS.some((c) => c.id === id))
   )
     throw Error("Unknown or duplicate issue.");
-  if (
-    typeof d.issueReason !== "string" ||
-    d.issueReason.length > 1000 ||
-    (d.issues.length && !d.issueReason.trim())
-  )
-    throw Error("Explain the selected issues (up to 1000 characters).");
+  if (typeof d.issueReason !== "string" || d.issueReason.length > 1000)
+    throw Error("The issue summary must be at most 1000 characters.");
   if (typeof d.note !== "string" || d.note.length > 1000)
     throw Error("Feedback must be at most 1000 characters.");
 }
@@ -95,7 +95,7 @@ export function draftResult(d: ReviewDraft) {
       !flags.length && total !== null
         ? BANDS.find((b) => total <= b.max)!
         : null,
-    ready: flags.length ? !!d.issueReason.trim() : complete,
+    ready: flags.length ? true : complete,
   };
 }
 export function feedbackFor(
@@ -105,18 +105,30 @@ export function feedbackFor(
   const r = draftResult(d);
   const lines = [`Idea #${idea.id} — ${idea.title}`];
   if (r.flags.length) {
-    lines.push("Further action required");
+    lines.push("## __**Checks Failed**__");
     for (const c of r.flags) lines.push(`${c.action}: ${c.feedback}`);
-    lines.push(`Council explanation: ${d.issueReason}`);
   } else if (r.band) {
-    lines.push(`${r.band.name} · ${r.total}/20`);
-    for (const c of CRITERIA)
-      lines.push(
-        `${c.name}: ${d.scores[c.id]}/5${c.weight === 2 ? " (×2)" : ""} — ${d.reasons[c.id]}`,
-      );
-    lines.push(r.band.feedback);
+    lines.push(
+      `${r.band.name} · ${r.total}/20`,
+      `**Summary:** ${r.band.feedback}`,
+    );
   } else lines.push("Draft — scores incomplete.");
-  if (d.note.trim()) lines.push(d.note.trim());
+  if (d.issues.length && d.issueReason.trim())
+    lines.push(`**Summary:** ${d.issueReason.trim()}`);
+  if (d.note.trim()) lines.push(`**Summary:** ${d.note.trim()}`);
+  for (const c of CRITERIA) {
+    const score = d.scores[c.id];
+    lines.push(
+      score === null
+        ? `${c.name}: not assessed`
+        : `${c.name}: ${score}/5${c.weight === 2 ? " (×2)" : ""}\n${c.levels[score - 1]}`,
+    );
+  }
+  const notes = CRITERIA.filter((c) => d.reasons[c.id]?.trim()).map(
+    (c) => `${c.name}: ${d.reasons[c.id].trim()}`,
+  );
+
+  if (notes.length) lines.push("Council notes:\n" + notes.join("\n"));
   lines.push("A recommendation does not guarantee implementation.");
   return lines.join("\n\n");
 }

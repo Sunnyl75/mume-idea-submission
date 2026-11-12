@@ -38,7 +38,7 @@ test("rubric: 125 score combinations give the weighted total and correct band", 
 test("rubric: a seconded yes-check suppresses the score and returns the idea", () => {
   const a = agree({ clarity: 1, evidence: 0, split: 0, exists: 0, duplicate: 0, dependency: 0, usefulness: 5, feasibility: 5, interest: 5 });
   const r = computeResult(a);
-  assert.equal(r.status, "Further action required");
+  assert.equal(r.status, "Checks Failed");
   assert.equal(r.total, null);
   assert.equal(r.flags.length, 1);
   assert.equal(r.flags[0].id, "clarity");

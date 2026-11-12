@@ -31,11 +31,11 @@ export const CRITERIA: Criterion[] = [
     name: "Usefulness",
     weight: 1,
     levels: [
-      "Limited or unproven practical benefit.",
-      "A modest benefit in narrow circumstances.",
-      "A worthwhile improvement for a defined group of players.",
-      "A substantial improvement, or addresses a recurring problem.",
-      "Addresses a major problem or benefits the whole game.",
+      "The practical benefit is limited or has not yet been demonstrated.",
+      "This offers a modest benefit in a narrow set of circumstances.",
+      "This would provide a worthwhile improvement for a defined group of players.",
+      "This would provide a substantial improvement or address a recurring problem.",
+      "This would address a major problem or provide substantial benefit across the game.",
     ],
   },
   {
@@ -43,11 +43,11 @@ export const CRITERIA: Criterion[] = [
     name: "Feasibility",
     weight: 2,
     levels: [
-      "Very large effort; extensive changes across many systems.",
-      "Substantial effort; significant changes and considerable testing.",
-      "Moderate effort; several changes and some testing.",
-      "Little effort; a small number of contained changes.",
-      "Minimal effort; a straightforward adjustment to existing content.",
+      "This would require a very large amount of work, with extensive changes across multiple systems.",
+      "This would require substantial work, involving significant changes and considerable testing.",
+      "This would require a moderate amount of work, with several changes and some testing.",
+      "This would require relatively little work, with a small number of contained changes.",
+      "This would require minimal work, such as a straightforward adjustment to existing content or behaviour.",
     ],
   },
   {
@@ -55,30 +55,91 @@ export const CRITERIA: Criterion[] = [
     name: "Interest",
     weight: 1,
     levels: [
-      "Little demonstrated interest so far.",
-      "A small number of players have asked for it.",
-      "Clear interest from a relevant group of players.",
-      "Strong interest across several groups.",
-      "Broad, sustained interest across the community.",
+      "There is little demonstrated interest so far.",
+      "A small number of players have expressed interest.",
+      "There is clear interest from a relevant group of players.",
+      "There is strong interest across several groups of players.",
+      "There is broad, sustained interest across the community.",
     ],
   },
 ];
 
 export const CHECKS: Check[] = [
-  { id: "clarity", name: "Needs more clarity", action: "Return for clarification", feedback: "Please clarify the problem and what the change would do." },
-  { id: "evidence", name: "Needs development or evidence", action: "Return for further work", feedback: "Needs more detail or examples before we can assess benefits and implications." },
-  { id: "split", name: "Several separable ideas", action: "Return to split", feedback: "Contains distinct changes; please submit them separately." },
-  { id: "exists", name: "Already exists", action: "Explain and close", feedback: "This is already supported; please explain any remaining gap." },
-  { id: "duplicate", name: "Duplicates a proposal", action: "Link and consolidate", feedback: "Overlaps an existing proposal; add your support there." },
-  { id: "dependency", name: "Depends on another change", action: "Defer and link", feedback: "Depends on another change being completed first." },
+  {
+    id: "clarity",
+    name: "Needs more clarity",
+    action: "Ask the original poster for clarification",
+    feedback:
+      "Ask them to clarify the problem they want to solve and what the proposed change would do.",
+  },
+  {
+    id: "evidence",
+    name: "Needs development or evidence",
+    action: "Ask the original poster for more detail or evidence",
+    feedback:
+      "Request details, examples or evidence so Council can assess the benefits and implications.",
+  },
+  {
+    id: "split",
+    name: "Several separable ideas",
+    action: "Ask the original poster to split the proposal",
+    feedback:
+      "Ask them to submit the distinct changes as separate proposals for independent assessment.",
+  },
+  {
+    id: "exists",
+    name: "Already exists",
+    action: "Tell the original poster the feature already exists",
+    feedback:
+      "Explain how to use the existing feature. Ask whether there is a remaining gap before closing the idea.",
+  },
+  {
+    id: "duplicate",
+    name: "Duplicates a proposal",
+    action: "Link the existing proposal and consolidate the discussion",
+    feedback:
+      "Tell the original poster where the existing discussion is and invite them to add their examples and support. If work is confirmed to be underway, explain its current status.",
+  },
+  {
+    id: "dependency",
+    name: "Depends on another change",
+    action: "Explain the prerequisite and defer the idea",
+    feedback:
+      "Tell the original poster which change must happen first and link it. State whether that work is planned or underway only when confirmed.",
+  },
 ];
 
 export const BANDS: Band[] = [
-  { max: 7, name: "Low priority", feedback: "Benefit and interest are limited relative to the effort. Other proposals take priority." },
-  { max: 10, name: "Worth retaining", feedback: "Some merit, but not a current priority. Keep for future consideration." },
-  { max: 13, name: "Worth considering", feedback: "A reasonable balance of benefit, interest and effort. Merits further consideration." },
-  { max: 16, name: "Recommended", feedback: "Scores well overall. We recommend considering it for implementation." },
-  { max: 20, name: "Strongly recommended", feedback: "A particularly favourable balance of benefit, interest and effort. High priority." },
+  {
+    max: 7,
+    name: "Low priority",
+    feedback:
+      "Benefit and interest are limited relative to the effort. Other proposals take priority.",
+  },
+  {
+    max: 10,
+    name: "Worth retaining",
+    feedback:
+      "Some merit, but not a current priority. Keep for future consideration.",
+  },
+  {
+    max: 13,
+    name: "Worth considering",
+    feedback:
+      "A reasonable balance of benefit, interest and effort. Merits further consideration.",
+  },
+  {
+    max: 16,
+    name: "Recommended",
+    feedback:
+      "Scores well overall. We recommend considering it for implementation.",
+  },
+  {
+    max: 20,
+    name: "Strongly recommended",
+    feedback:
+      "A particularly favourable balance of benefit, interest and effort. High priority.",
+  },
 ];
 
 export const CRITERION_IDS = CRITERIA.map((c) => c.id);
@@ -90,7 +151,8 @@ export const isCheck = (id: string): boolean => CHECK_IDS.includes(id);
 
 // value: criteria 1..5, checks 0|1 (1 = "yes", which flags the idea for return).
 export function isValidValue(itemId: string, value: number): boolean {
-  if (isCriterion(itemId)) return Number.isInteger(value) && value >= 1 && value <= 5;
+  if (isCriterion(itemId))
+    return Number.isInteger(value) && value >= 1 && value <= 5;
   if (isCheck(itemId)) return value === 0 || value === 1;
   return false;
 }
@@ -107,7 +169,7 @@ export interface Assignment {
 export type Assignments = Record<string, Assignment>;
 
 export interface ReviewResult {
-  status: "Assessment in progress" | "Further action required" | "Assessment agreed";
+  status: "Assessment in progress" | "Checks Failed" | "Assessment agreed";
   flags: Check[];
   pendingIds: string[];
   total: number | null;
@@ -119,22 +181,57 @@ export interface ReviewResult {
 // idea; otherwise, once every item is seconded, the weighted total gives a band.
 export function computeResult(assignments: Assignments): ReviewResult {
   const agreed = (id: string): boolean => !!assignments[id]?.seconderId;
-  const flags = CHECKS.filter((c) => agreed(c.id) && assignments[c.id].value === 1);
+  const flags = CHECKS.filter(
+    (c) => agreed(c.id) && assignments[c.id].value === 1,
+  );
   const pendingIds = ITEM_IDS.filter((id) => !agreed(id));
   const secondedCount = ITEM_IDS.length - pendingIds.length;
 
-  if (flags.length) return { status: "Further action required", flags, pendingIds, total: null, band: null, secondedCount };
-  if (pendingIds.length) return { status: "Assessment in progress", flags, pendingIds, total: null, band: null, secondedCount };
+  if (flags.length)
+    return {
+      status: "Checks Failed",
+      flags,
+      pendingIds,
+      total: null,
+      band: null,
+      secondedCount,
+    };
+  if (pendingIds.length)
+    return {
+      status: "Assessment in progress",
+      flags,
+      pendingIds,
+      total: null,
+      band: null,
+      secondedCount,
+    };
 
-  const total = CRITERIA.reduce((sum, c) => sum + assignments[c.id].value * c.weight, 0);
+  const total = CRITERIA.reduce(
+    (sum, c) => sum + assignments[c.id].value * c.weight,
+    0,
+  );
   const band = BANDS.find((b) => total <= b.max) ?? BANDS[BANDS.length - 1];
-  return { status: "Assessment agreed", flags, pendingIds: [], total, band, secondedCount };
+  return {
+    status: "Assessment agreed",
+    flags,
+    pendingIds: [],
+    total,
+    band,
+    secondedCount,
+  };
 }
 
 // The author-facing feedback text, built from the agreed assessment.
-export function feedbackText(ideaRef: string, assignments: Assignments, councilNote: string): string {
+export function feedbackText(
+  ideaRef: string,
+  assignments: Assignments,
+  councilNote: string,
+): string {
   const r = computeResult(assignments);
-  const lines: string[] = [ideaRef, r.status];
+  const lines: string[] = [
+    ideaRef,
+    r.flags.length ? "## __**Checks Failed**__" : r.status,
+  ];
   if (r.flags.length) {
     for (const c of r.flags) {
       lines.push(`${c.action}: ${c.feedback}`);
@@ -148,7 +245,9 @@ export function feedbackText(ideaRef: string, assignments: Assignments, councilN
     }
     lines.push(r.band.feedback);
   } else {
-    lines.push("Final recommendation pending until every check and score is seconded.");
+    lines.push(
+      "Final recommendation pending until every check and score is seconded.",
+    );
   }
   if (councilNote.trim()) lines.push(councilNote.trim());
   return lines.join("\n\n");

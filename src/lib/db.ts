@@ -1,8 +1,7 @@
 // D1 access for ideas and status history.
 
 import type { Answers, Env, IdeaRow, Status } from "../types";
-// Re-enable with the guarded updateStatus below (gate temporarily disabled 2026-10-20):
-// import { AGREEMENTS_REQUIRED } from "./sharedReview";
+import { AGREEMENTS_REQUIRED } from "./sharedReview";
 
 export async function getIdea(env: Env, id: number): Promise<IdeaRow | null> {
   const row = await env.DB.prepare("SELECT * FROM ideas WHERE id = ?").bind(id).first<IdeaRow>();
@@ -87,15 +86,8 @@ export async function updateStatus(
   status: Status,
   now: number,
 ): Promise<void> {
-  // ASSESSMENT GATE TEMPORARILY DISABLED (2026-10-20): plain status write, no
-  // assessment requirement for Reviewed and no "publishing" lock. Re-enable the
-  // guarded version below (and the canMarkReviewed check in interactions.ts) once the
-  // shared-assessment UX is reworked.
-  await env.DB.prepare("UPDATE ideas SET status=?, updated_at=? WHERE id=?")
-    .bind(status, now, ideaId)
-    .run();
-
-  /* Guarded version — re-enable to require 3 agreements for Reviewed:
+  // Guard Reviewed at the write itself, not just the UI: approvals must match the
+  // current score revision and the current idea content at the moment of update.
   const result = await env.DB.prepare(
     `UPDATE ideas SET status=?,updated_at=? WHERE id=?
     AND NOT EXISTS(SELECT 1 FROM council_reviews WHERE idea_id=ideas.id AND status='publishing')
@@ -120,7 +112,6 @@ export async function updateStatus(
         ? "Reviewed requires three Council members to agree to the current final scores. Refresh after any changes."
         : "An assessment is being recorded. Retry the status change after recording completes.",
     );
-  */
 }
 
 export async function logStatus(

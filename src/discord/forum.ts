@@ -1,7 +1,7 @@
 // Forum channel operations (build spec §8, §9, §10).
 
 import type { Env, FormConfig, IdeaRow, Status } from "../types";
-import { reviewButton } from "./review";
+import { reviewButton, withReviewSummary } from "./review";
 import { DISCORD_API, KV, STATUSES, TAG_NAME, VOTE_EMOJIS } from "../constants";
 import { DiscordRestError, discordFetch, discordJson } from "./rest";
 import { buildEmbed, buildIdeaComponents, ideaThreadName } from "./embed";
@@ -123,7 +123,7 @@ export async function createReviewPost(
       name: ideaThreadName(idea.id, idea.title),
       auto_archive_duration: AUTO_ARCHIVE,
       message: {
-        embeds: [buildEmbed(idea, config)],
+        embeds: await withReviewSummary(env, idea, [buildEmbed(idea, config)]),
         components: withAssessButton(env, idea.id, buildIdeaComponents(idea.id)),
       },
     },
@@ -205,7 +205,7 @@ export async function refreshIdeaPost(env: Env, idea: IdeaRow, config: FormConfi
   if (idea.review_thread_id && idea.review_message_id) {
     await discordFetch(env, `/channels/${idea.review_thread_id}/messages/${idea.review_message_id}`, {
       method: "PATCH",
-      body: { embeds: [embed], components: withAssessButton(env, idea.id, buildIdeaComponents(idea.id)) },
+      body: { embeds: await withReviewSummary(env, idea, [embed]), components: withAssessButton(env, idea.id, buildIdeaComponents(idea.id)) },
     }).catch((e) => console.error("review refresh failed", e));
     await discordFetch(env, `/channels/${idea.review_thread_id}`, { method: "PATCH", body: { name } }).catch(() => {});
   }

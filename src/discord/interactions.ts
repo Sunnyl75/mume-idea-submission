@@ -1,13 +1,12 @@
 // Interaction dispatch (build spec §7) and the status state machine (§9).
 
 import type { Env, FormConfig, IdeaRow, Status } from "../types";
-import { handleReviewInteraction, reviewButton } from "./review";
+import { handleReviewInteraction, reviewButton, withReviewSummary } from "./review";
 import { EPHEMERAL, InteractionResponseType as IRT, KV, STATUS_LABEL } from "../constants";
 import { allFields, loadConfigVersion, loadLiveConfig } from "../lib/config";
 import { attachReview, deleteIdea, getIdea, logStatus, updateIdeaAnswers, updateStatus } from "../lib/db";
 import { decideTransition } from "../lib/transitions";
-// Re-enable with the Reviewed assessment gate below (temporarily disabled 2026-10-20):
-// import { canMarkReviewed } from "../lib/sharedReviewDb";
+import { canMarkReviewed } from "../lib/sharedReviewDb";
 import { holdsCouncil } from "../lib/council";
 import { ideaToWordDoc } from "../lib/worddoc";
 import { validateAnswers } from "../lib/validate";
@@ -280,13 +279,10 @@ async function handleStatusChange(env: Env, ctx: ExecutionContext, interaction: 
     return ephemeral(decision.reason);
   }
 
-  // TEMPORARILY DISABLED (2026-10-20): the assessment's 3-agreement gate on marking an
-  // idea Reviewed is off while the shared-assessment UX is reworked. Re-enable by
-  // uncommenting this block and its `canMarkReviewed` import at the top of the file.
-  // if (target === "approved" && !(await canMarkReviewed(env, idea))) {
-  //   ctx.waitUntil(resetSelect(env, interaction, idea).catch((e) => console.error("reset failed", e)));
-  //   return ephemeral("Before marking this idea Reviewed, three Council members must agree to its current final scores.");
-  // }
+  if (target === "approved" && !(await canMarkReviewed(env, idea))) {
+    ctx.waitUntil(resetSelect(env, interaction, idea).catch((e) => console.error("reset failed", e)));
+    return ephemeral("Before marking this idea Reviewed, three Council members must agree to its current final scores.");
+  }
 
   // Deferred update; do the work after acking (spec §9.5).
   ctx.waitUntil(applyTransition(env, interaction, idea, target, actorId, displayName(member)));
@@ -299,7 +295,9 @@ async function resetSelect(env: Env, interaction: Interaction, idea: IdeaRow): P
   await discordFetch(env, `/channels/${interaction.channel_id}/messages/${interaction.message.id}`, {
     method: "PATCH",
     body: {
-      embeds: [buildEmbed(idea, config)],
+      embeds: idea.review_thread_id && interaction.channel_id === idea.review_thread_id
+        ? await withReviewSummary(env, idea, [buildEmbed(idea, config)])
+        : [buildEmbed(idea, config)],
       components: idea.review_thread_id && interaction.channel_id === idea.review_thread_id
         ? [...buildIdeaComponents(idea.id), reviewButton(idea.id)]
         : buildIdeaComponents(idea.id),
@@ -402,12 +400,13 @@ async function renderIdeaEverywhere(
   const reviewComponents = [...buildIdeaComponents(idea.id), reviewButton(idea.id)];
   const clicked = interaction.message?.id;
   const clickedIsReview = !!idea.review_message_id && clicked === idea.review_message_id;
+  const reviewEmbeds = hasReview ? await withReviewSummary(env, idea, [embed]) : [embed];
 
   const webhook = `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`;
   await discordFetch(env, webhook, {
     method: "PATCH",
     unauthenticated: true,
-    body: { embeds: [embed], components: clickedIsReview ? reviewComponents : publicComponents },
+    body: { embeds: clickedIsReview ? reviewEmbeds : [embed], components: clickedIsReview ? reviewComponents : publicComponents },
   }).catch((e) => console.error("original edit failed", e));
 
   if (idea.thread_id && idea.message_id && idea.message_id !== clicked) {
@@ -419,7 +418,7 @@ async function renderIdeaEverywhere(
   if (idea.review_thread_id && idea.review_message_id && idea.review_message_id !== clicked) {
     await discordFetch(env, `/channels/${idea.review_thread_id}/messages/${idea.review_message_id}`, {
       method: "PATCH",
-      body: { embeds: [embed], components: reviewComponents },
+      body: { embeds: reviewEmbeds, components: reviewComponents },
     }).catch((e) => console.error("review copy sync failed", e));
   }
 }

@@ -1,44 +1,113 @@
 # Council assessment in Discord
 
-This replaces the per-item propose/second workflow from PR #1 with a fluid shared
-assessment, one second on the complete selected checks, and three agreements on
-the final scores.
+This follows merged PR #2 with the shared assessment improvements tested in Mudpit: one second on the complete selected checks and three agreements on the final scores. It restores the Reviewed gate temporarily disabled in main while the assessment interface was being reworked.
 
 ## Review flow
 
-1. In the private submitted-ideas forum, click **Assess idea**. A Council-only
-   ephemeral panel opens inside Discord. Panels are personal snapshots of a shared
-   D1 draft; use **Refresh** to see others' changes.
-2. **Issues requiring action** is a multi-select dropdown. Pick one or more issues
-   and explain them in the modal. None selected means pass by default, with no second.
-   Another Council member clicks **Second** once to endorse the
-   entire selection and its explanation. A member cannot second their own selection.
-   The seconder can withdraw their second; changing the selection or explanation
-   clears the second and attributes the new selection to the editor.
-3. **Adjust scores / feedback** opens a five-field form: three scores (`4 | reason`,
-   for example), an internal note / response guidance, and the reason for the edit.
-   Scores remain fluid during discussion. Usefulness ×1, Feasibility ×2 (effort only),
-   Interest ×1 produces 4–20 and the existing recommendation bands.
-4. **Agree with final scores** is a separate step. Three distinct Council members
-   explicitly agree to the complete set of scores and their reasons. The editor
-   can be one of the three, but editing does not count as agreement. Members can
-   withdraw their own score agreement. No voting on incomplete scores.
-5. Approval scopes are independent. Score/reason changes reset only score agreements.
-   Check selection/explanation changes reset only the checks second. An internal-note
-   edit resets neither: that note is working material, not part of the score vote.
-   All changes are audited. Underlying idea changes invalidate both approval scopes;
-   revise against its new content before new approvals or internal recording.
-6. **Preview internal summary** shows what will be recorded. When no issues are
-   selected, **Close and record internally** requires all scores and three score
-   agreements. When issues are selected, the complete check selection needs one
-   second; that return/defer outcome overrides scores and can be recorded before
-   completing them. It does not label unfinished scores as agreed.
-7. Closing posts the assessment only to the private Council thread and freezes it.
-   A Council member uses it as the basis for a separately written response. Nothing
-   reaches the public board, author or reviewed exports through this feature.
-8. **Reopen assessment** explicitly restarts both approval scopes: checks need a
-   fresh second if selected, and scores need three fresh agreements. A Resolved
-   idea must first be reopened using the status dropdown.
+1. In the private Council review thread, click **Assess idea**, then **Start
+   assessment**. Any Council member can start. Their name is shown as the editor;
+   merely opening a panel does not claim the assessment. Existing drafts keep their
+   scores, checks and history and start with no assigned editor after migration 0006.
+2. Click **Score** for the first scoring. Select all three **1–5 dropdowns**;
+   no explanation is required. All categories are mandatory and the popup says
+   **Please score all categories, or cancel**. After scores have been submitted,
+   use the separate **Submit changed scores** button; existing selections are
+   preselected and a reason is required only when a number changes. That reason
+   becomes the explanation for the changed categories. Unchanged categories keep
+   their explanations. An unchanged submission writes nothing and preserves votes.
+3. The editor saves changes directly. Other members use those same controls to
+   **request a change**. A request records its proposer, timestamp, reason, exact
+   replacement draft and base revision without changing the current assessment.
+   The panel lists recent requests; **More options → Change requests** displays each complete
+   proposal with previous/next navigation, including withdrawn and outdated requests.
+4. The editor can **Accept / back and apply** a request. Alternatively, **one other
+   Council member** can use the same button while the editor is absent. The proposer
+   cannot back their own request. Application transfers editing to the proposer,
+   records the accepting/backing member, and applies exactly that proposal. Any
+   intervening assessment edit or idea-content change makes it outdated; a new
+   request is needed. Proposers can withdraw their pending requests.
+5. **Issues requiring action** is a multi-select dropdown. Unselected issues pass
+   by default. The editor saves a selection directly; another member proposes it as
+   a change request. Once selected checks are applied to the assessment, a different
+   Council member clicks **Second** once for the entire set and its explanation.
+   Backing a change request is not that checks second. Submitting an assessment
+   remains blocked until every score category has a value.
+6. Submitting a new complete score set automatically records the submitter's
+   agreement, atomically with the scores. Two other distinct members agreeing
+   brings the total to three. A score-change request does not count until applied;
+   application starts the revised score set at one agreement from its proposer,
+   not the accepting/backing member. **Agree with final scores** adds other members;
+   a member can withdraw their own agreement. Starting an assessment or changing
+   checks alone never adds a score agreement.
+7. Score/explanation edits reset score agreements only. Check/explanation edits reset
+   the checks second only. Underlying idea changes
+   invalidate both. Requesting or withdrawing a change resets neither because the
+   assessment has not changed. Accepted requests follow the same scope rules as edits.
+8. **More options → Review summary** shows what will be recorded. **Submit
+   Assessment** is green and requires complete scores in every case. With no
+   issues selected it needs three score agreements; selected checks instead need
+   one second for an internal return/defer record. Closing freezes
+   editing and request application. The existing Reviewed gate still requires three
+   agreements on the complete current scores, even for a return/defer assessment.
+9. **Reopen assessment** clears both approvals and the editor so any Council member
+   can start the next round. Scores and request/event history remain. A Resolved idea
+   must first be reopened using its status dropdown.
+
+A stable **Current assessment** summary sits directly below the idea in the private
+Council starter post. It shows scores, selected blocking checks, required approvals
+and changes awaiting review. The same message is updated after scoring, votes,
+seconds, changes, withdrawals and submission; it survives status/content refreshes.
+Opening Assess idea or reloading repairs existing posts. No assessment summary is
+added to public posts or exports. Long private idea cards reserve space within
+Discord's combined embed budget; stored idea content is preserved.
+
+Scores appear above Checks in the personal panel, with the current state at the top.
+Scores, Checks and assessment actions are separate bordered sections. **Second**
+and **Withdraw my Second** are adjacent, as are the two score-agreement buttons.
+After starting, the disabled start button reads **Assessment in Progress**.
+There is no Internal note control; existing stored notes/history remain intact.
+
+Actions and component-modal submissions update the same private panel rather than
+adding a response for every change. **More options → Reload latest assessment**
+loads changes made by other Council members after the panel was opened. Summary
+and request-detail views replace this panel and have a Back button. Merely opening
+Assess idea again creates another personal panel. Assessments stay Council-only;
+a member writes the eventual player-facing response separately.
+
+### Rubric and response guidance
+
+The response summary starts with the recommendation and its main feedback sentence,
+then lists each selected score and the corresponding full rubric description.
+Reviewer-written explanations appear separately under **Council notes**, so they
+never replace the rubric text. The private thread's **Current assessment** box
+includes both response guidance and the selected rubric descriptions, as does the
+Scores section of the personal panel. Blocking checks still take priority, with
+score/rubric context retained for writing the response.
+
+The dropdown uses a shortened description only when needed for Discord's
+100-character option limit. Summaries show the full approved wording. Existing
+recorded messages are historical records; reopen the assessment panel to refresh
+the head-of-thread box and use **Review summary** to see the new format with the
+existing scores. Newly recorded assessments use that format too.
+
+### Assessment history
+
+**Assessment history** opens a Council-only, read-only log in the same private
+panel. Entries show the recorded member name, date/time, revision, action and
+reason. Score/check edits show before/after values. Votes and withdrawals show
+which scores or checks were being endorsed at that event. Change requests are
+explicitly labelled as proposals until applied.
+
+The log shows five events per page, newest first, with **Older** / **Newer**
+navigation. Opening the history pins its latest event so new votes do not shift
+entries between pages; return to the assessment and reopen history to include new
+events. Use **View full assessment at an event** to read the complete saved scores,
+explanations, checks and reason. Long snapshots have previous/next parts. **Back to
+assessment** returns to the current panel. History remains available for closed or
+resolved ideas and viewing it does not change assessments, votes or audit records.
+
+This reads existing shared-assessment events; it needs no new migration and does
+not reconstruct events that were never recorded by an older bot version.
 
 The existing In Proposal / Final Draft / Submitted / Reviewed / Resolved status
 workflow stays separate. Closing an assessment does not change the idea status.
@@ -46,7 +115,7 @@ workflow stays separate. Closing an assessment does not change the idea status.
 its current complete scores.** The Discord dropdown explains why a premature
 attempt is rejected, and the database update checks the same condition atomically.
 A changed idea, revised scores or withdrawn agreement cannot bypass this gate.
-A checks second alone allows an internal return/defer record, but does not permit
+A checks second with complete scores allows an internal return/defer record, but does not permit
 marking the idea Reviewed without the three final-score agreements. Reviewed exports
 still contain the original idea (not the assessment); the private Council thread holds the
 recorded assessment. There is no new Activity, OAuth setup or slash command.
@@ -81,6 +150,27 @@ such failures. A maintainer can recover a persistently failed reserved publicati
 by fixing Discord permissions and retrying; do not reset it before checking for an
 already-delivered message. Mentions in assessment output are suppressed.
 
+Migration `0006_assessment_change_requests.sql` adds nullable editor fields and
+an append-only-in-content change-request table. Prior assessments, approvals,
+requests and audit records are not deleted. Request creation, withdrawal and
+application are audited transactionally. The editor check and request application
+are enforced in the database write, not just by showing/hiding controls. A stale
+request cannot overwrite a newer revision or changed idea. Requests can be applied
+only by a different Council member and only while the assessment is open.
+
+The score modal uses three required Discord Label/String Select components and
+completion/cancellation instructions in the first label description. Initial scoring has no reason input;
+changing submitted scores adds an optional reason input, validated on submission. Both forms also contain an optional Summary field, prefilled from the shared draft; this wording is retained in previews, the head-of-thread assessment and the recorded submission. The form uses Labels only (at most five), without a standalone Text Display. Discord modals have no disabled fields or live
+on-change callbacks, so the reason cannot dynamically gray out or become required
+while the popup is open. Conditional reason validation happens on submission.
+Requiring all three selects makes Discord keep the native popup open when a
+category is missing. Its Submit/close buttons and native validation text cannot
+be replaced by a custom dynamically disabled button or an OK/Cancel popup. Both Label and legacy Action Row submissions can be read;
+legacy combined-score modal saves must be refreshed instead of being silently
+interpreted as dropdown input. Test the updated modal on actual Discord clients
+before production deployment. The compact panel uses Components V2 containers;
+public idea posts and the recorded Council summary keep their existing format.
+
 Existing PR #1 tables/history are retained. On first native access, existing values
 are imported into an **unagreed draft**; old per-item seconds never count as the new
 three-person agreement. The previous web review page explains where reviewing moved,
@@ -88,7 +178,7 @@ and its mutation API returns 410 so it cannot publish via the obsolete rules.
 
 ## Deploy and refresh
 
-First test this branch in staging with three real Council identities. Staging's
+Before production deployment, complete staging acceptance with three real Council identities, including the latest optional check-summary and change-request confirmation changes. Staging's
 `everyone` Council sentinel is only for its test guild. Use a modern Node release
 (Node 22.13+; Node 24 recommended) for tests that exercise production SQL through
 Node's SQLite API. No runtime dependencies were added.
@@ -102,7 +192,7 @@ npx wrangler deploy --dry-run
 ```
 
 After review, the maintainer verifies the correct Cloudflare account, applies
-migrations 0004 and 0005 and deploys to staging, then production. Existing configured roles
+migrations 0004, 0005 and 0006 and deploys to staging, then production. Existing configured roles
 and permissions should suffice; the bot needs Send Messages, Embed Links, Manage
 Threads and Read Message History in the relevant forums. No new Discord portal
 configuration or command registration is needed.
@@ -127,3 +217,13 @@ approval invalidation, repeated votes, withdrawals, stale
 revisions/content, frozen publication, full event snapshots, and native role/guild
 checks. SQLite tests execute the production D1 SQL through a transactional adapter;
 real Discord interaction and deployed D1 acceptance are part of staging verification.
+
+Failed checks are headed **Checks Failed**, with bold/underline heading markup. Guidance tells Council what to do next, such as ask the original poster for clarification or explain the existing feature. Work is described as underway only when confirmed; a duplicate does not itself establish implementation status. Check explanations and response wording have explicit Summary labels. Editing only the response summary preserves score agreements and check seconds, while still following the editor/change-request rules and recording a new audit snapshot. A reason entered with unchanged scores is rejected with guidance to use Summary, rather than silently discarded.
+
+Discord window-switching/rendering reports still require testing in the affected client after deployment. The simpler Label-only modal layout is a mitigation to evaluate, not a verified fix for a client reload.
+
+Modal openings read the existing review, idea status/private thread and prior scoring history in a single read-only D1 query. They do not create/import a review. A 1.6-second database-read budget returns a private retry message rather than waiting past Discord's initial-response deadline. The Worker logs `review modal response` with operation, idea ID and elapsed milliseconds, plus errors/timeouts (without interaction tokens or draft text). Submissions still perform authoritative revision, role, thread and ownership checks. This protects the database portion of the deadline; network delivery or a Worker-level failure still needs live logs to diagnose.
+
+The checks popup lists all selected issues in a heading. Its Summary field is optional and says “Add any summary of the issue you would like to include.” Blank summaries are allowed through validation, editor changes, change requests, seconds and submission. The audit reason still records the selected checks or their removal; that generated audit description is not inserted into the user's summary.
+
+After the checks form is submitted, the private panel explicitly confirms either **Checks saved** or **Change request saved**, showing the selected checks and the entered summary. For another member's assessment, it explains that the current checks stay unchanged until the request is accepted/backed and provides a View change requests button. Worker diagnostics record selected issue IDs, summary length and whether a request was proposed, without recording summary text.
